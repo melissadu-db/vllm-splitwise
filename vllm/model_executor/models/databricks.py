@@ -42,7 +42,7 @@ class DatabricksRouter(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_total_experts = config.ffn_config["moe_num_experts"]
+        self.num_total_experts = config.ffn_config.moe_num_experts
         self.d_model = config.d_model
         self.layer = ReplicatedLinear(self.d_model,
                                       self.num_total_experts,
@@ -221,9 +221,6 @@ class DatabricksAttention(nn.Module):
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
-        if self.qk_ln:
-            q = self.q_ln(q)
-            k = self.k_ln(k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         hidden_states, _ = self.out_proj(attn_output)
@@ -299,9 +296,6 @@ class DatabricksModel(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        assert config.embedding_fraction == 1.0
-        assert config.norm_type == "low_precision_layernorm"
-
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
@@ -309,12 +303,11 @@ class DatabricksModel(nn.Module):
         self.blocks = nn.ModuleList(
             [DatabricksBlock(config, linear_method) for _ in range(config.n_layers)])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
-        if config.no_bias:
-            for module in self.modules():
-                if hasattr(module, "bias") and isinstance(
+        for module in self.modules():
+            if hasattr(module, "bias") and isinstance(
                         module.bias, nn.Parameter):
-                    # Remove the bias term in Linear and LayerNorm.
-                    module.register_parameter("bias", None)
+                # Remove the bias term in Linear and LayerNorm.
+                module.register_parameter("bias", None)
 
     def forward(
         self,
