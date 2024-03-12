@@ -82,7 +82,7 @@ class MPT2MoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.router = Router(config, linear_method, self.params_dtype)
+        self.router = Router(config, self.params_dtype)
         self.ws = nn.Parameter(
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
