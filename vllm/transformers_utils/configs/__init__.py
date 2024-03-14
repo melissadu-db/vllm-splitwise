@@ -8,9 +8,6 @@ from vllm.transformers_utils.configs.starcoder2 import Starcoder2Config
 from vllm.transformers_utils.configs.databricks import DatabricksConfig
 
 __all__ = [
-    "ChatGLMConfig",
-    "MPTConfig",
-    "RWConfig",
-    "Starcoder2Config",
+    "ChatGLMConfig", "MPTConfig", "RWConfig", "Starcoder2Config",
     "DatabricksConfig"
 ]

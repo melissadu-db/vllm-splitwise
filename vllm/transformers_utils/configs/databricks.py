@@ -17,7 +17,6 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from typing import Optional, Any
 
-
 logger = logging.get_logger(__name__)
 
 DATABRICKS_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
@@ -50,19 +49,23 @@ class DatabricksAttentionConfig(PretrainedConfig):
         super().__init__()
         self.attn_pdrop = attn_pdrop
         self.clip_qkv = clip_qkv
-        self.kv_n_heads=kv_n_heads
-        self.rope_theta=rope_theta
+        self.kv_n_heads = kv_n_heads
+        self.rope_theta = rope_theta
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs: Any) -> "PretrainedConfig":
+    def from_pretrained(cls, pretrained_model_name_or_path: str,
+                        **kwargs: Any) -> "PretrainedConfig":
         cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_dict, kwargs = cls.get_config_dict(
+            pretrained_model_name_or_path, **kwargs)
 
         if config_dict.get("model_type") == "databricks":
             config_dict = config_dict["attn_config"]
 
-        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
+        if "model_type" in config_dict and hasattr(
+                cls,
+                "model_type") and config_dict["model_type"] != cls.model_type:
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
                 f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
@@ -105,15 +108,19 @@ class DatabricksFFNConfig(PretrainedConfig):
         self.uniform_expert_assignment = uniform_expert_assignment
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs: Any) -> "PretrainedConfig":
+    def from_pretrained(cls, pretrained_model_name_or_path: str,
+                        **kwargs: Any) -> "PretrainedConfig":
         cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_dict, kwargs = cls.get_config_dict(
+            pretrained_model_name_or_path, **kwargs)
 
         if config_dict.get("model_type") == "databricks":
             config_dict = config_dict["ffn_config"]
 
-        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
+        if "model_type" in config_dict and hasattr(
+                cls,
+                "model_type") and config_dict["model_type"] != cls.model_type:
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
                 f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
@@ -227,7 +234,6 @@ class DatabricksConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.use_cache = use_cache
         self.initializer_range = initializer_range
-        self.kv_n_heads = self.attn_config.kv_n_heads
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,

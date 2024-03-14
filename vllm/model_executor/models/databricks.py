@@ -219,7 +219,7 @@ class DatabricksAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
-            qkv = qkv.clamp(min=-self.clip_qkv, max=self.clip_qkv)
+            qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=2)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
@@ -268,7 +268,8 @@ class DatabricksBlock(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        self.norm_attn_norm = DatabricksFusedNormAttention(config, linear_method)
+        self.norm_attn_norm = DatabricksFusedNormAttention(
+            config, linear_method)
         self.ffn = DatabricksExperts(config, linear_method)
 
     def forward(
@@ -301,12 +302,14 @@ class DatabricksModel(nn.Module):
             config.vocab_size,
             config.d_model,
         )
-        self.blocks = nn.ModuleList(
-            [DatabricksBlock(config, linear_method) for _ in range(config.n_layers)])
+        self.blocks = nn.ModuleList([
+            DatabricksBlock(config, linear_method)
+            for _ in range(config.n_layers)
+        ])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
-            if hasattr(module, "bias") and isinstance(
-                        module.bias, nn.Parameter):
+            if hasattr(module, "bias") and isinstance(module.bias,
+                                                      nn.Parameter):
                 # Remove the bias term in Linear and LayerNorm.
                 module.register_parameter("bias", None)
 
