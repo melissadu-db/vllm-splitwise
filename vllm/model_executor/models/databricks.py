@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear,
@@ -203,7 +203,7 @@ class DatabricksAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.attn = PagedAttention(
+        self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
