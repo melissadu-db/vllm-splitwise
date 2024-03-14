@@ -262,6 +262,8 @@ class ModelConfig:
             "num_key_value_heads",
             # For ChatGLM:
             "multi_query_group_num",
+            # For DB1:
+            "kv_n_heads",
         ]
         for attr in attributes:
             num_kv_heads = getattr(self.hf_config, attr, None)

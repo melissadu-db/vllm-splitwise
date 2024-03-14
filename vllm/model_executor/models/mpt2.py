@@ -231,6 +231,7 @@ class MPT2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
+            print(f"clamping...")
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)

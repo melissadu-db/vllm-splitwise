@@ -227,6 +227,7 @@ class DatabricksConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.use_cache = use_cache
         self.initializer_range = initializer_range
+        self.kv_n_heads = self.attn_config.kv_n_heads
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,

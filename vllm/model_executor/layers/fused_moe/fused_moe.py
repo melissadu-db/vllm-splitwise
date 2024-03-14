@@ -289,10 +289,8 @@ def fused_moe(
 
     if is_hip():
         # The MoE kernels are not yet supported on ROCm.
-        routing_weights = torch.softmax(gating_output,
-                                        dim=-1,
-                                        dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+        routing_weights = gating_output.softmax(dim=-1, dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(gating_output, topk, dim=-1)
     else:
         import vllm._moe_C as moe_kernels
 

@@ -188,6 +188,7 @@ class DatabricksAttention(nn.Module):
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
+        self.tp_size = tp_world_size
         assert self.total_num_heads % tp_world_size == 0
         self.num_heads = self.total_num_heads // tp_world_size
         if self.total_num_kv_heads >= tp_world_size:
@@ -218,8 +219,8 @@ class DatabricksAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
-            qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            qkv = qkv.clamp(min=-self.clip_qkv, max=self.clip_qkv)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=2)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
