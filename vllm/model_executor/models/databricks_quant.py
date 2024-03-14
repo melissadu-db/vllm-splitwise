@@ -58,12 +58,15 @@ class DatabricksRouter(nn.Module):
 
 
 class DatabricksExperts(nn.Module):
-    """A tensor-parallel MoE implementation for Databricks that shards each expert
-    across all ranks.
+    """An expert-parallel MoE implementation for Databricks that shards the
+    experts so that each rank has a num_experts/tp_degree experts.
 
-    Each expert's weights are sharded across all ranks and a fused MoE
-    kernel is used for the forward pass, and finally we reduce the outputs
-    across ranks.
+    Each rank computes its experts times the incoming hidden state and then
+    multiplies by the expert weight (which is 0 if the expert is unused).
+    This keeps the graph static, but is inefficient if less than
+    num_experts/tp_degree experts are used on each GPU.
+    
+    Finally we reduce the outputs across ranks.
     """
 
     def __init__(
