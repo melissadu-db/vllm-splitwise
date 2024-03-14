@@ -33,7 +33,7 @@ class DatabricksAttentionConfig(PretrainedConfig):
     Args:
         attn_pdrop (`float`, *optional*, defaults to 0.0):
             The dropout probability for the attention layers.
-        clip_qkv (`float`, *optional*, defualts to None):
+        clip_qkv (`float`, *optional*, defaults to None):
             If not `None`, clip the queries, keys, and values in the attention layer to this value.
         kv_n_heads (Optional[int]): For grouped_query_attention only, allow user to specify number of kv heads.
         rope_theta (float): The base frequency for rope.
