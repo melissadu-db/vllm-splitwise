@@ -254,6 +254,11 @@ class ModelConfig:
             # Currently, tensor parallelism is not supported in this case.
             return 1
 
+        # For Databricks 1 and MPT
+        if self.hf_config.model_type in ["databricks", "mpt"]:
+            return getattr(self.hf_config.attn_config, "kv_n_heads",
+                           self.hf_config.num_attention_heads)
+
         attributes = [
             # For Falcon:
             "n_head_kv",
@@ -261,7 +266,7 @@ class ModelConfig:
             # For LLaMA-2:
             "num_key_value_heads",
             # For ChatGLM:
-            "multi_query_group_num",
+            "multi_query_group_num"
         ]
         for attr in attributes:
             num_kv_heads = getattr(self.hf_config, attr, None)

@@ -23,26 +23,26 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.mpt import MPTConfig
+from vllm.transformers_utils.configs.databricks import DatabricksConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.utils import set_weight_attrs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class Router(nn.Module):
-    """A Router implementation for MPT2 that returns logits for each expert
+class DatabricksRouter(nn.Module):
+    """A Router implementation for Databricks that returns logits for each expert
     per token.
     """
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: DatabricksConfig,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_total_experts = config.ffn_config["moe_num_experts"]
+        self.num_total_experts = config.ffn_config.moe_num_experts
         self.d_model = config.d_model
         self.layer = ReplicatedLinear(self.d_model,
                                       self.num_total_experts,
@@ -55,8 +55,8 @@ class Router(nn.Module):
         return router_logits
 
 
-class MPT2MoE(nn.Module):
-    """A tensor-parallel MoE implementation for MPT2 that shards each expert
+class DatabricksExperts(nn.Module):
+    """A tensor-parallel MoE implementation for Databricks that shards each expert
     across all ranks.
 
     Each expert's weights are sharded across all ranks and a fused MoE
@@ -66,23 +66,22 @@ class MPT2MoE(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: DatabricksConfig,
         linear_method: Optional[LinearMethodBase] = None,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_total_experts = config.ffn_config["moe_num_experts"]
-        self.top_k = config.ffn_config["moe_top_k"]
+        self.num_total_experts = config.ffn_config.moe_num_experts
+        self.top_k = config.ffn_config.moe_top_k
         self.d_model = config.d_model
-        self.intermediate_size = config.ffn_config[
-            "ffn_hidden_size"] // self.tp_size
+        self.intermediate_size = config.ffn_config.ffn_hidden_size // self.tp_size
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.router = Router(config, linear_method, self.params_dtype)
+        self.router = DatabricksRouter(config, self.params_dtype)
         self.ws = nn.Parameter(
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
@@ -149,30 +148,21 @@ class MPT2MoE(nn.Module):
                                         hidden_size)
 
 
-class MPT2Attention(nn.Module):
+class DatabricksAttention(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: DatabricksConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
         self.head_dim = self.d_model // self.total_num_heads
-        if "kv_n_heads" in config.attn_config:
-            self.total_num_kv_heads = config.attn_config["kv_n_heads"]
-        else:
-            self.total_num_kv_heads = self.total_num_heads
-        self.clip_qkv = config.attn_config["clip_qkv"]
-        self.qk_ln = config.attn_config["qk_ln"]
-        self.alibi = config.attn_config["alibi"]
-        if self.alibi:
-            self.alibi_bias_max = config.attn_config["alibi_bias_max"]
-        else:
-            self.rope_theta = config.attn_config["rope_theta"]
+        self.total_num_kv_heads = config.attn_config.kv_n_heads
+        self.clip_qkv = config.attn_config.clip_qkv
+        self.rope_theta = config.attn_config.rope_theta
         self.max_position = config.max_seq_len
-        assert not config.attn_config["prefix_lm"]
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
@@ -180,16 +170,13 @@ class MPT2Attention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=not config.no_bias,
+            bias=False,
             linear_method=linear_method,
         )
-        if self.qk_ln:
-            self.q_ln = nn.LayerNorm(self.d_model)
-            self.k_ln = nn.LayerNorm(self.d_model)
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
-            bias=not config.no_bias,
+            bias=False,
             linear_method=linear_method,
         )
         self.rotary_emb = get_rope(
@@ -201,6 +188,7 @@ class MPT2Attention(nn.Module):
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
+        self.tp_size = tp_world_size
         assert self.total_num_heads % tp_world_size == 0
         self.num_heads = self.total_num_heads // tp_world_size
         if self.total_num_kv_heads >= tp_world_size:
@@ -232,27 +220,24 @@ class MPT2Attention(nn.Module):
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=2)
         q, k = self.rotary_emb(position_ids, q, k)
-        if self.qk_ln:
-            q = self.q_ln(q)
-            k = self.k_ln(k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         hidden_states, _ = self.out_proj(attn_output)
         return hidden_states
 
 
-class FusedNormMPT2AttentionNorm(nn.Module):
+class DatabricksFusedNormAttention(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: DatabricksConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.d_model = config.d_model
-        self.attn = MPT2Attention(config, linear_method)
+        self.attn = DatabricksAttention(config, linear_method)
         self.norm_1 = nn.LayerNorm(self.d_model)
         self.norm_2 = nn.LayerNorm(self.d_model)
 
@@ -275,16 +260,17 @@ class FusedNormMPT2AttentionNorm(nn.Module):
         return hidden_states, residual
 
 
-class MPT2Block(nn.Module):
+class DatabricksBlock(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: DatabricksConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        self.norm_attn_norm = FusedNormMPT2AttentionNorm(config, linear_method)
-        self.ffn = MPT2MoE(config, linear_method)
+        self.norm_attn_norm = DatabricksFusedNormAttention(
+            config, linear_method)
+        self.ffn = DatabricksExperts(config, linear_method)
 
     def forward(
         self,
@@ -304,30 +290,28 @@ class MPT2Block(nn.Module):
         return hidden_states
 
 
-class MPT2Model(nn.Module):
+class DatabricksModel(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: DatabricksConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        assert config.embedding_fraction == 1.0
-        assert config.norm_type == "low_precision_layernorm"
-
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
         )
-        self.blocks = nn.ModuleList(
-            [MPT2Block(config, linear_method) for _ in range(config.n_layers)])
+        self.blocks = nn.ModuleList([
+            DatabricksBlock(config, linear_method)
+            for _ in range(config.n_layers)
+        ])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
-        if config.no_bias:
-            for module in self.modules():
-                if hasattr(module, "bias") and isinstance(
-                        module.bias, nn.Parameter):
-                    # Remove the bias term in Linear and LayerNorm.
-                    module.register_parameter("bias", None)
+        for module in self.modules():
+            if hasattr(module, "bias") and isinstance(module.bias,
+                                                      nn.Parameter):
+                # Remove the bias term in Linear and LayerNorm.
+                module.register_parameter("bias", None)
 
     def forward(
         self,
@@ -349,18 +333,18 @@ class MPT2Model(nn.Module):
         return hidden_states
 
 
-class MPT2ForCausalLM(nn.Module):
+class DatabricksForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: DatabricksConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
         self.unpadded_vocab_size = config.vocab_size
-        self.transformer = MPT2Model(config, linear_method)
+        self.transformer = DatabricksModel(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.d_model,
                                       org_num_embeddings=config.vocab_size,
