@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Databricks configuration"""
+"""Databricks configuration"""
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from typing import Optional, Any
@@ -43,14 +43,21 @@ class DatabricksAttentionConfig(PretrainedConfig):
         self,
         attn_pdrop: float = 0,
         clip_qkv: Optional[float] = None,
-        kv_n_heads: int = 8,
+        kv_n_heads: int = 1,
         rope_theta: float = 10000.0,
+        **kwargs: Any,
     ):
         super().__init__()
         self.attn_pdrop = attn_pdrop
         self.clip_qkv = clip_qkv
         self.kv_n_heads = kv_n_heads
         self.rope_theta = rope_theta
+
+        for k in ['model_type']:
+            if k in kwargs:
+                kwargs.pop(k)
+        if len(kwargs) != 0:
+            raise ValueError(f"Found unknown {kwargs=}")
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str,
@@ -89,13 +96,14 @@ class DatabricksFFNConfig(PretrainedConfig):
     def __init__(
         self,
         ffn_act_fn: str = 'silu',
-        ffn_hidden_size: int = 10752,
-        moe_num_experts: int = 16,
-        moe_top_k: int = 4,
+        ffn_hidden_size: int = 3584,
+        moe_num_experts: int = 4,
+        moe_top_k: int = 1,
         moe_jitter_eps: Optional[float] = None,
-        moe_loss_weight: float = 0.05,
+        moe_loss_weight: float = 0.01,
         moe_normalize_expert_weights: Optional[float] = 1,
         uniform_expert_assignment: bool = False,
+        **kwargs: Any,
     ):
         super().__init__()
         self.ffn_act_fn = ffn_act_fn
@@ -106,6 +114,12 @@ class DatabricksFFNConfig(PretrainedConfig):
         self.moe_loss_weight = moe_loss_weight
         self.moe_normalize_expert_weights = moe_normalize_expert_weights
         self.uniform_expert_assignment = uniform_expert_assignment
+
+        for k in ['model_type']:
+            if k in kwargs:
+                kwargs.pop(k)
+        if len(kwargs) != 0:
+            raise ValueError(f"Found unknown {kwargs=}")
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str,
@@ -198,11 +212,13 @@ class DatabricksConfig(PretrainedConfig):
 
     def __init__(
         self,
-        d_model: int = 6144,
-        n_heads: int = 48,
-        n_layers: int = 40,
-        max_seq_len: int = 32768,
-        vocab_size: int = 100352,
+        d_model: int = 2048,
+        n_heads: int = 16,
+        n_layers: int = 24,
+        max_seq_len: int = 2048,
+        vocab_size: int = 32000,
+        resid_pdrop: float = 0.0,
+        emb_pdrop: float = 0.0,
         attn_config: Optional[DatabricksAttentionConfig] = None,
         ffn_config: Optional[DatabricksFFNConfig] = None,
         use_cache: bool = True,
@@ -232,6 +248,8 @@ class DatabricksConfig(PretrainedConfig):
         self.n_layers = n_layers
         self.max_seq_len = max_seq_len
         self.vocab_size = vocab_size
+        self.resid_pdrop = resid_pdrop
+        self.emb_pdrop = emb_pdrop
         self.use_cache = use_cache
         self.initializer_range = initializer_range
         super().__init__(
