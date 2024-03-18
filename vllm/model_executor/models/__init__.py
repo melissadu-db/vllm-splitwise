@@ -34,7 +34,7 @@ _MODELS = {
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
-    "QuantDatabricksForCausalLM": ("databricks_quant", "DatabricksForCausalLM"),
+    "QuantDbrxForCausalLM": ("dbrx_quant", "DbrxForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),

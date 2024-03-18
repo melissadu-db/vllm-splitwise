@@ -25,21 +25,21 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.databricks import DatabricksConfig
+from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.utils import set_weight_attrs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class DatabricksRouter(nn.Module):
-    """A Router implementation for Databricks that returns logits for each expert
+class DbrxRouter(nn.Module):
+    """A Router implementation for Dbrx that returns logits for each expert
     per token.
     """
 
     def __init__(
         self,
-        config: DatabricksConfig,
+        config: DbrxConfig,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
@@ -57,8 +57,8 @@ class DatabricksRouter(nn.Module):
         return router_logits
 
 
-class DatabricksExperts(nn.Module):
-    """An expert-parallel MoE implementation for Databricks that shards the
+class DbrxExperts(nn.Module):
+    """An expert-parallel MoE implementation for Dbrx that shards the
     experts so that each rank has a num_experts/tp_degree experts.
 
     Each rank computes its experts times the incoming hidden state and then
@@ -71,7 +71,7 @@ class DatabricksExperts(nn.Module):
 
     def __init__(
         self,
-        config: DatabricksConfig,
+        config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
         params_dtype: Optional[torch.dtype] = None,
     ):
@@ -95,7 +95,7 @@ class DatabricksExperts(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.router = DatabricksRouter(config, self.params_dtype)
+        self.router = DbrxRouter(config, self.params_dtype)
 
         self.w1 = nn.ModuleList([
             ReplicatedLinear(self.d_model,
@@ -153,11 +153,11 @@ class DatabricksExperts(nn.Module):
         return tensor_model_parallel_all_reduce(final_hidden_states).view(
             batch_size, sequence_length, hidden_size)
 
-class DatabricksAttention(nn.Module):
+class DbrxAttention(nn.Module):
 
     def __init__(
         self,
-        config: DatabricksConfig,
+        config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -233,16 +233,16 @@ class DatabricksAttention(nn.Module):
         return hidden_states
 
 
-class DatabricksFusedNormAttention(nn.Module):
+class DbrxFusedNormAttention(nn.Module):
 
     def __init__(
         self,
-        config: DatabricksConfig,
+        config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.d_model = config.d_model
-        self.attn = DatabricksAttention(config, linear_method)
+        self.attn = DbrxAttention(config, linear_method)
         self.norm_1 = nn.LayerNorm(self.d_model)
         self.norm_2 = nn.LayerNorm(self.d_model)
 
@@ -265,17 +265,17 @@ class DatabricksFusedNormAttention(nn.Module):
         return hidden_states, residual
 
 
-class DatabricksBlock(nn.Module):
+class DbrxBlock(nn.Module):
 
     def __init__(
         self,
-        config: DatabricksConfig,
+        config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        self.norm_attn_norm = DatabricksFusedNormAttention(
+        self.norm_attn_norm = DbrxFusedNormAttention(
             config, linear_method)
-        self.ffn = DatabricksExperts(config, linear_method)
+        self.ffn = DbrxExperts(config, linear_method)
 
     def forward(
         self,
@@ -295,11 +295,11 @@ class DatabricksBlock(nn.Module):
         return hidden_states
 
 
-class DatabricksModel(nn.Module):
+class DbrxModel(nn.Module):
 
     def __init__(
         self,
-        config: DatabricksConfig,
+        config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -308,7 +308,7 @@ class DatabricksModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList([
-            DatabricksBlock(config, linear_method)
+            DbrxBlock(config, linear_method)
             for _ in range(config.n_layers)
         ])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
@@ -338,18 +338,18 @@ class DatabricksModel(nn.Module):
         return hidden_states
 
 
-class DatabricksForCausalLM(nn.Module):
+class DbrxForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: DatabricksConfig,
+        config: DbrxConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
         self.unpadded_vocab_size = config.vocab_size
-        self.transformer = DatabricksModel(config, linear_method)
+        self.transformer = DbrxModel(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.d_model,
                                       org_num_embeddings=config.vocab_size,
