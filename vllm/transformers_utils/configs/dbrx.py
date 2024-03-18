@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2023 HuggingFace Inc. team and Databricks team.
+# Copyright 2023 HuggingFace Inc. team and Dbrx team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,19 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Databricks configuration"""
+"""DBRX configuration"""
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from typing import Optional, Any
 
 logger = logging.get_logger(__name__)
 
-DATABRICKS_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
+DBRX_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 
-class DatabricksAttentionConfig(PretrainedConfig):
+class DbrxAttentionConfig(PretrainedConfig):
     """
-    This is the configuration class to store the configuration of a [`DatabricksAttention`] class. It is used to instantiate
+    This is the configuration class to store the configuration of a [`DbrxAttention`] class. It is used to instantiate
     attention layers according to the specified arguments, defining the layers architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
@@ -67,7 +67,7 @@ class DatabricksAttentionConfig(PretrainedConfig):
         config_dict, kwargs = cls.get_config_dict(
             pretrained_model_name_or_path, **kwargs)
 
-        if config_dict.get("model_type") == "databricks":
+        if config_dict.get("model_type") == "dbrx":
             config_dict = config_dict["attn_config"]
 
         if "model_type" in config_dict and hasattr(
@@ -81,9 +81,9 @@ class DatabricksAttentionConfig(PretrainedConfig):
         return cls.from_dict(config_dict, **kwargs)
 
 
-class DatabricksFFNConfig(PretrainedConfig):
+class DbrxFFNConfig(PretrainedConfig):
     """
-    This is the configuration class to store the configuration of a [`DatabricksFFN`] class. It is used to instantiate
+    This is the configuration class to store the configuration of a [`DbrxFFN`] class. It is used to instantiate
     feedforward layers according to the specified arguments, defining the layers architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
@@ -129,7 +129,7 @@ class DatabricksFFNConfig(PretrainedConfig):
         config_dict, kwargs = cls.get_config_dict(
             pretrained_model_name_or_path, **kwargs)
 
-        if config_dict.get("model_type") == "databricks":
+        if config_dict.get("model_type") == "dbrx":
             config_dict = config_dict["ffn_config"]
 
         if "model_type" in config_dict and hasattr(
@@ -143,9 +143,9 @@ class DatabricksFFNConfig(PretrainedConfig):
         return cls.from_dict(config_dict, **kwargs)
 
 
-class DatabricksConfig(PretrainedConfig):
+class DbrxConfig(PretrainedConfig):
     """
-    This is the configuration class to store the configuration of a [`DatabricksModel`]. It is used to instantiate a Databricks model
+    This is the configuration class to store the configuration of a [`DbrxModel`]. It is used to instantiate a Dbrx model
     according to the specified arguments, defining the model architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
@@ -162,8 +162,8 @@ class DatabricksConfig(PretrainedConfig):
         max_seq_len (`int`, *optional*, defaults to 32768):
             The maximum sequence length of the model.
         vocab_size (`int`, *optional*, defaults to 100352):
-            Vocabulary size of the Databricks model. Defines the maximum number of different tokens that can be represented by
-            the `inputs_ids` passed when calling [`DatabricksModel`].
+            Vocabulary size of the Dbrx model. Defines the maximum number of different tokens that can be represented by
+            the `inputs_ids` passed when calling [`DbrxModel`].
         resid_pdrop (`float`, *optional*, defaults to 0.0):
             The dropout probability applied to the attention output before combining with residual.
         emb_pdrop (`float`, *optional*, defaults to 0.0):
@@ -189,20 +189,20 @@ class DatabricksConfig(PretrainedConfig):
     Example:
 
     ```python
-    >>> from transformers import DatabricksConfig, DatabricksModel
+    >>> from transformers import DbrxConfig, DbrxModel
 
-    >>> # Initializing a Databricks configuration
-    >>> configuration = DatabricksConfig()
+    >>> # Initializing a Dbrx configuration
+    >>> configuration = DbrxConfig()
 
     >>> # Initializing a model (with random weights) from the configuration
-    >>> model = DatabricksModel(configuration)
+    >>> model = DbrxModel(configuration)
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```
     """
 
-    model_type = "databricks"
+    model_type = "dbrx"
     attribute_map = {
         "num_attention_heads": "n_heads",
         "hidden_size": "d_model",
@@ -219,8 +219,8 @@ class DatabricksConfig(PretrainedConfig):
         vocab_size: int = 32000,
         resid_pdrop: float = 0.0,
         emb_pdrop: float = 0.0,
-        attn_config: Optional[DatabricksAttentionConfig] = None,
-        ffn_config: Optional[DatabricksFFNConfig] = None,
+        attn_config: Optional[DbrxAttentionConfig] = None,
+        ffn_config: Optional[DbrxFFNConfig] = None,
         use_cache: bool = True,
         pad_token_id: Optional[int] = None,
         bos_token_id: Optional[int] = 1,
@@ -230,16 +230,16 @@ class DatabricksConfig(PretrainedConfig):
         **kwargs: Any,
     ):
         if attn_config is None:
-            self.attn_config = DatabricksAttentionConfig()
+            self.attn_config = DbrxAttentionConfig()
         elif isinstance(attn_config, dict):
-            self.attn_config = DatabricksAttentionConfig(**attn_config)
+            self.attn_config = DbrxAttentionConfig(**attn_config)
         else:
             self.attn_config = attn_config
 
         if ffn_config is None:
-            self.ffn_config = DatabricksFFNConfig()
+            self.ffn_config = DbrxFFNConfig()
         elif isinstance(ffn_config, dict):
-            self.ffn_config = DatabricksFFNConfig(**ffn_config)
+            self.ffn_config = DbrxFFNConfig(**ffn_config)
         else:
             self.ffn_config = ffn_config
 
