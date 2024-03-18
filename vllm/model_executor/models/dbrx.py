@@ -31,7 +31,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class DbrxRouter(nn.Module):
-    """A Router implementation for Databricks that returns logits for each expert
+    """A Router implementation for DBRX that returns logits for each expert
     per token.
     """
 
@@ -56,7 +56,7 @@ class DbrxRouter(nn.Module):
 
 
 class DbrxExperts(nn.Module):
-    """A tensor-parallel MoE implementation for Databricks that shards each expert
+    """A tensor-parallel MoE implementation for DBRX that shards each expert
     across all ranks.
 
     Each expert's weights are sharded across all ranks and a fused MoE

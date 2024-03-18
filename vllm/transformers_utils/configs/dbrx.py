@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2023 HuggingFace Inc. team and Databricks team.
+# Copyright 2023 HuggingFace Inc. team and Dbrx team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ DBRX_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 class DbrxAttentionConfig(PretrainedConfig):
     """
-    This is the configuration class to store the configuration of a [`DatabricksAttention`] class. It is used to instantiate
+    This is the configuration class to store the configuration of a [`DbrxAttention`] class. It is used to instantiate
     attention layers according to the specified arguments, defining the layers architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
@@ -145,7 +145,7 @@ class DbrxFFNConfig(PretrainedConfig):
 
 class DbrxConfig(PretrainedConfig):
     """
-    This is the configuration class to store the configuration of a [`DatabricksModel`]. It is used to instantiate a Databricks model
+    This is the configuration class to store the configuration of a [`DbrxModel`]. It is used to instantiate a Dbrx model
     according to the specified arguments, defining the model architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
@@ -162,8 +162,8 @@ class DbrxConfig(PretrainedConfig):
         max_seq_len (`int`, *optional*, defaults to 32768):
             The maximum sequence length of the model.
         vocab_size (`int`, *optional*, defaults to 100352):
-            Vocabulary size of the Databricks model. Defines the maximum number of different tokens that can be represented by
-            the `inputs_ids` passed when calling [`DatabricksModel`].
+            Vocabulary size of the Dbrx model. Defines the maximum number of different tokens that can be represented by
+            the `inputs_ids` passed when calling [`DbrxModel`].
         resid_pdrop (`float`, *optional*, defaults to 0.0):
             The dropout probability applied to the attention output before combining with residual.
         emb_pdrop (`float`, *optional*, defaults to 0.0):
@@ -189,13 +189,13 @@ class DbrxConfig(PretrainedConfig):
     Example:
 
     ```python
-    >>> from transformers import DatabricksConfig, DatabricksModel
+    >>> from transformers import DbrxConfig, DbrxModel
 
-    >>> # Initializing a Databricks configuration
-    >>> configuration = DatabricksConfig()
+    >>> # Initializing a Dbrx configuration
+    >>> configuration = DbrxConfig()
 
     >>> # Initializing a model (with random weights) from the configuration
-    >>> model = DatabricksModel(configuration)
+    >>> model = DbrxModel(configuration)
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
