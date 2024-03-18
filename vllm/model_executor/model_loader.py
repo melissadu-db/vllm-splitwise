@@ -29,7 +29,7 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
         architectures = ["QuantMixtralForCausalLM"]
     if (model_config.quantization is not None
             and "DbrxForCausalLM" in architectures):
-        architectures = ["QuantDatabricksForCausalLM"]
+        architectures = ["QuantDbrxForCausalLM"]
 
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
