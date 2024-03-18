@@ -23,7 +23,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.databricks import DbrxConfig
+from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.utils import set_weight_attrs
 
