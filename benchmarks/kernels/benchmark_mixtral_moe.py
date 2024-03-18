@@ -20,12 +20,12 @@ def main():
 
 
 def run_grid(bs, method):
-    d_model = 4096
-    num_total_experts = 8
-    top_k = 2
-    tp_size = 2
-    model_intermediate_size = 14336
-    num_layers = 32
+    d_model = 6144
+    num_total_experts = 16
+    top_k = 4
+    tp_size = 4
+    model_intermediate_size = 10752
+    num_layers = 40
     num_calls = 100
 
     num_warmup_trials = 1
