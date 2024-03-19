@@ -183,7 +183,6 @@ class DbrxExperts(nn.Module):
                             self.intermediate_size,
                             device="cuda",
                             dtype=self.params_dtype))
-            print('DbrxExperts: using fused_moe')
             set_weight_attrs(self.ws, {
                 "weight_loader": self.weight_loader,
             })
@@ -226,10 +225,11 @@ class DbrxExperts(nn.Module):
         if self.linear_method and not isinstance(
                 self.linear_method, UnquantizedLinearMethod
         ) and self.linear_method.quant_config.support_fused_moe():
+
             final_hidden_states = self.linear_method.apply_moe_weights(
                 self.ws.linear_weights,
                 self.w2s.linear_weights,
-                self.d_model,
+                hidden_states,
                 router_logits,
                 self.top_k,
                 renormalize=True,
@@ -243,9 +243,9 @@ class DbrxExperts(nn.Module):
                                 renormalize=True,
                                 inplace=True)
 
-            if self.tp_size > 1:
-                final_hidden_states = tensor_model_parallel_all_reduce(
-                    final_hidden_states)
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states.view(batch_size, sequence_length,
                                         hidden_size)
@@ -495,6 +495,7 @@ class DbrxForCausalLM(nn.Module):
 
             for name, loaded_weight in hf_model_weights_iterator(
                     model_name_or_path, cache_dir, load_format, revision):
+                print(f'{name=}')
                 for (param_name, weight_name, shard_id,
                      expert_id) in expert_params_mapping:
                     if weight_name not in name:
@@ -515,6 +516,13 @@ class DbrxForCausalLM(nn.Module):
                                       expert_id=expert_id)
                     break
                 else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Skip experts that are not assigned to this worker.
+                    if ("ffn.experts.mlp." in name
+                            and name not in params_dict):
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
