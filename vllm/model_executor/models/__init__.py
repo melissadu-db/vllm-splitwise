@@ -32,6 +32,8 @@ _MODELS = {
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
+    "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
+    "QuantDbrxForCausalLM": ("dbrx_quant", "DbrxForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -61,8 +63,11 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
     "Sliding window attention is not yet supported in ROCm's flash attention",
 }
 
-# Models not supported by Neuron.
-_NEURON_SUPPORTED_MODELS = {"LlamaForCausalLM": "neuron.llama"}
+# Models supported by Neuron.
+_NEURON_SUPPORTED_MODELS = {
+    "LlamaForCausalLM": "neuron.llama",
+    "MistralForCausalLM": "neuron.mistral"
+}
 
 
 class ModelRegistry:

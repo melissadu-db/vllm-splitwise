@@ -1,4 +1,4 @@
-from typing import Optional, Union, ClassVar
+from typing import TYPE_CHECKING, Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
 from packaging.version import Version
@@ -9,6 +9,9 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
@@ -165,13 +168,18 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
-
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+
             # If the GPTQ model is serialized in marlin format, use marlin.
             if (hf_quant_method == "gptq"
                     and "is_marlin_format" in hf_quant_config
                     and hf_quant_config["is_marlin_format"]):
+                logger.info("The model is serialized in Marlin format. "
+                            "Using Marlin kernel.")
                 hf_quant_method = "marlin"
+                if self.quantization == "gptq":
+                    self.quantization = hf_quant_method
+
             if self.quantization is None:
                 self.quantization = hf_quant_method
             elif self.quantization != hf_quant_method:
@@ -254,6 +262,11 @@ class ModelConfig:
             # Currently, tensor parallelism is not supported in this case.
             return 1
 
+        # For DBRX and MPT
+        if self.hf_config.model_type in ["dbrx", "mpt"]:
+            return getattr(self.hf_config.attn_config, "kv_n_heads",
+                           self.hf_config.num_attention_heads)
+
         attributes = [
             # For Falcon:
             "n_head_kv",
@@ -261,7 +274,7 @@ class ModelConfig:
             # For LLaMA-2:
             "num_key_value_heads",
             # For ChatGLM:
-            "multi_query_group_num",
+            "multi_query_group_num"
         ]
         for attr in attributes:
             num_kv_heads = getattr(self.hf_config, attr, None)
@@ -397,6 +410,7 @@ class ParallelConfig:
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
@@ -412,6 +426,7 @@ class ParallelConfig:
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.ray_workers_use_nsight = ray_workers_use_nsight
+        self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.

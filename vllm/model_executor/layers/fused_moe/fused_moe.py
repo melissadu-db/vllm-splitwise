@@ -245,13 +245,17 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
+def get_config_file_name(E: int, N: int) -> str:
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
+    return f"E={E},N={N},device_name={device_name}.json"
+
+
 def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
 ):
     """Compute top-k indice and weights from gating logits
-
     Args:
         gating_output (torch.Tensor): The output of the gating operation
           (before softmax).
@@ -259,36 +263,37 @@ def fused_topk(
         renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     """
     M = gating_output.shape[0]
-    if is_hip():
-        # The MoE kernels are not yet supported on ROCm.
-        routing_weights = torch.softmax(gating_output,
-                                        dim=-1,
-                                        dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
-    else:
-        import vllm._moe_C as moe_kernels
+    # if is_hip():
+    #     # The MoE kernels are not yet supported on ROCm.
+    #     routing_weights = torch.softmax(gating_output,
+    #                                     dim=-1,
+    #                                     dtype=torch.float32)
+    #     topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    # else:
+    #     import vllm._moe_C as moe_kernels
 
-        topk_weights = torch.empty(M,
-                                   topk,
-                                   dtype=torch.float32,
-                                   device=gating_output.device)
-        topk_ids = torch.empty(M,
-                               topk,
-                               dtype=torch.int32,
-                               device=gating_output.device)
-        token_expert_indicies = torch.empty(M,
-                                            topk,
-                                            dtype=torch.int32,
-                                            device=gating_output.device)
-        moe_kernels.topk_softmax(
-            topk_weights,
-            topk_ids,
-            token_expert_indicies,
-            gating_output.float(),  # TODO(woosuk): Optimize this.
-        )
-        del token_expert_indicies  # Not used. Will be used in the future.
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    #     topk_weights = torch.empty(M,
+    #                                topk,
+    #                                dtype=torch.float32,
+    #                                device=gating_output.device)
+    #     topk_ids = torch.empty(M,
+    #                            topk,
+    #                            dtype=torch.int32,
+    #                            device=gating_output.device)
+    #     token_expert_indicies = torch.empty(M,
+    #                                         topk,
+    #                                         dtype=torch.int32,
+    #                                         device=gating_output.device)
+    #     moe_kernels.topk_softmax(
+    #         topk_weights,
+    #         topk_ids,
+    #         token_expert_indicies,
+    #         gating_output.float(),  # TODO(woosuk): Optimize this.
+    #     )
+    #     del token_expert_indicies  # Not used. Will be used in the future.
+    # if renormalize:
+    #     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
     return topk_weights, topk_ids
 
 
@@ -305,11 +310,10 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    device_name = torch.cuda.get_device_name().replace(" ", "_")
+    json_file_name = get_config_file_name(E, N)
 
     config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs",
-        f"E={E},N={N},device_name={device_name}.json")
+        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(
@@ -358,13 +362,44 @@ def fused_moe(
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
+    # assert w1.is_contiguous(), "Expert weights1 must be contiguous"
+    # assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
-    topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
+    if is_hip():
+        # The MoE kernels are not yet supported on ROCm.
+        routing_weights = torch.softmax(gating_output,
+                                        dim=-1,
+                                        dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    else:
+        import vllm._moe_C as moe_kernels
+
+        topk_weights = torch.empty(M,
+                                   topk,
+                                   dtype=torch.float32,
+                                   device=hidden_states.device)
+        topk_ids = torch.empty(M,
+                               topk,
+                               dtype=torch.int32,
+                               device=hidden_states.device)
+        token_expert_indicies = torch.empty(M,
+                                            topk,
+                                            dtype=torch.int32,
+                                            device=hidden_states.device)
+        moe_kernels.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),  # TODO(woosuk): Optimize this.
+        )
+        del token_expert_indicies  # Not used. Will be used in the future.
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     if override_config:
         config = override_config
