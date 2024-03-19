@@ -263,37 +263,36 @@ def fused_topk(
         renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     """
     M = gating_output.shape[0]
-    # if is_hip():
-    #     # The MoE kernels are not yet supported on ROCm.
-    #     routing_weights = torch.softmax(gating_output,
-    #                                     dim=-1,
-    #                                     dtype=torch.float32)
-    #     topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
-    # else:
-    #     import vllm._moe_C as moe_kernels
+    if is_hip():
+        # The MoE kernels are not yet supported on ROCm.
+        routing_weights = torch.softmax(gating_output,
+                                        dim=-1,
+                                        dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    else:
+        import vllm._moe_C as moe_kernels
 
-    #     topk_weights = torch.empty(M,
-    #                                topk,
-    #                                dtype=torch.float32,
-    #                                device=gating_output.device)
-    #     topk_ids = torch.empty(M,
-    #                            topk,
-    #                            dtype=torch.int32,
-    #                            device=gating_output.device)
-    #     token_expert_indicies = torch.empty(M,
-    #                                         topk,
-    #                                         dtype=torch.int32,
-    #                                         device=gating_output.device)
-    #     moe_kernels.topk_softmax(
-    #         topk_weights,
-    #         topk_ids,
-    #         token_expert_indicies,
-    #         gating_output.float(),  # TODO(woosuk): Optimize this.
-    #     )
-    #     del token_expert_indicies  # Not used. Will be used in the future.
-    # if renormalize:
-    #     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
+        topk_weights = torch.empty(M,
+                                   topk,
+                                   dtype=torch.float32,
+                                   device=gating_output.device)
+        topk_ids = torch.empty(M,
+                               topk,
+                               dtype=torch.int32,
+                               device=gating_output.device)
+        token_expert_indicies = torch.empty(M,
+                                            topk,
+                                            dtype=torch.int32,
+                                            device=gating_output.device)
+        moe_kernels.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),  # TODO(woosuk): Optimize this.
+        )
+        del token_expert_indicies  # Not used. Will be used in the future.
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
 
 
@@ -370,36 +369,37 @@ def fused_moe(
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
-    if is_hip():
-        # The MoE kernels are not yet supported on ROCm.
-        routing_weights = torch.softmax(gating_output,
-                                        dim=-1,
-                                        dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
-    else:
-        import vllm._moe_C as moe_kernels
+    # if is_hip():
+    #     # The MoE kernels are not yet supported on ROCm.
+    #     routing_weights = torch.softmax(gating_output,
+    #                                     dim=-1,
+    #                                     dtype=torch.float32)
+    #     topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    # else:
+    #     import vllm._moe_C as moe_kernels
 
-        topk_weights = torch.empty(M,
-                                   topk,
-                                   dtype=torch.float32,
-                                   device=hidden_states.device)
-        topk_ids = torch.empty(M,
-                               topk,
-                               dtype=torch.int32,
-                               device=hidden_states.device)
-        token_expert_indicies = torch.empty(M,
-                                            topk,
-                                            dtype=torch.int32,
-                                            device=hidden_states.device)
-        moe_kernels.topk_softmax(
-            topk_weights,
-            topk_ids,
-            token_expert_indicies,
-            gating_output.float(),  # TODO(woosuk): Optimize this.
-        )
-        del token_expert_indicies  # Not used. Will be used in the future.
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    #     topk_weights = torch.empty(M,
+    #                                topk,
+    #                                dtype=torch.float32,
+    #                                device=hidden_states.device)
+    #     topk_ids = torch.empty(M,
+    #                            topk,
+    #                            dtype=torch.int32,
+    #                            device=hidden_states.device)
+    #     token_expert_indicies = torch.empty(M,
+    #                                         topk,
+    #                                         dtype=torch.int32,
+    #                                         device=hidden_states.device)
+    #     moe_kernels.topk_softmax(
+    #         topk_weights,
+    #         topk_ids,
+    #         token_expert_indicies,
+    #         gating_output.float(),  # TODO(woosuk): Optimize this.
+    #     )
+    #     del token_expert_indicies  # Not used. Will be used in the future.
+    # if renormalize:
+    #     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
 
     if override_config:
         config = override_config
