@@ -148,7 +148,6 @@ class DbrxExperts(nn.Module):
         self.num_total_experts = config.ffn_config.moe_num_experts
         self.top_k = config.ffn_config.moe_top_k
         self.d_model = config.d_model
-        self.intermediate_size = config.ffn_config.ffn_hidden_size // self.tp_size
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -160,6 +159,8 @@ class DbrxExperts(nn.Module):
         if self.linear_method and not isinstance(
                 self.linear_method, UnquantizedLinearMethod
         ) and self.linear_method.quant_config.support_fused_moe():
+            self.intermediate_size = config.ffn_config.ffn_hidden_size
+
             self.ws = MergedColumnParallelLinear(self.d_model,
                                                     [self.intermediate_size] * 2,
                                                     bias=False,
@@ -171,6 +172,7 @@ class DbrxExperts(nn.Module):
                                             linear_method=linear_method,
                                             num_experts=self.num_total_experts)
         else:
+            self.intermediate_size = config.ffn_config.ffn_hidden_size // self.tp_size
             self.ws = nn.Parameter(
                 torch.empty(self.num_total_experts,
                             2 * self.intermediate_size,
@@ -495,7 +497,6 @@ class DbrxForCausalLM(nn.Module):
 
             for name, loaded_weight in hf_model_weights_iterator(
                     model_name_or_path, cache_dir, load_format, revision):
-                print(f'{name=}')
                 for (param_name, weight_name, shard_id,
                      expert_id) in expert_params_mapping:
                     if weight_name not in name:
@@ -505,6 +506,7 @@ class DbrxForCausalLM(nn.Module):
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
+
                     if shard_id is None:
                         weight_loader(param,
                                       loaded_weight,
@@ -533,17 +535,12 @@ class DbrxForCausalLM(nn.Module):
                 f"experts.mlp.{weight_name}")
                 for weight_name in ["w1", "v1", "w2"]
             ]
-            print(f'{expert_params_mapping=}')
-            print(f'{params_dict.keys()=}')
             for name, loaded_weight in hf_model_weights_iterator(
                     model_name_or_path, cache_dir, load_format, revision):
-                print(f'{name=}')
                 for param_name, weight_name in expert_params_mapping:
                     if weight_name not in name:
                         continue
-                    print(f'{param_name=}, {weight_name=}, {name=}')
                     name = name.replace(weight_name, param_name)
-                    print(f'{param_name=}, {weight_name=}, {name=}')
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
