@@ -25,7 +25,6 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
     # Special handling for quantized DbrxForCausalLM.
     if (model_config.quantization is not None
             and "DbrxForCausalLM" in architectures):
-        print(f'{model_config.quantization=}')
         architectures = ["QuantDbrxForCausalLM"]
 
     for arch in architectures:
