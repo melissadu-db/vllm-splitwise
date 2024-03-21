@@ -72,9 +72,8 @@ class GPTQConfig(QuantizationConfig):
         return []
 
     def support_fused_moe(self) -> bool:
-        # Fused MoE only supports 4-bit so far.
-        return True
-        return self.weight_bits == 4
+        # Fused MoE only supports 4-bit and 8-bit.
+        return self.weight_bits == 4 or self.weight_bits == 8
 
 
 class ExllamaState(Enum):
