@@ -819,6 +819,14 @@ __global__ void reconstruct_exllama_8bit_kernel
     half* __restrict__ b
 )
 {
+    if (blockIdx.z > 0){
+        // divide by 4 since 8 bit
+        b_q_weight = b_q_weight + blockIdx.z * size_k * size_n / 4;
+        b_gptq_qzeros = b_gptq_qzeros + blockIdx.z * groups * size_n / 4;
+        b_gptq_scales = b_gptq_scales + blockIdx.z * groups * size_n;
+        if (b_q_perm) b_q_perm = b_q_perm + blockIdx.z * size_k;
+        b = b + blockIdx.z * size_k * size_n;
+    }
     MatrixView_half_rw b_(b, size_k, size_n);
     MatrixView_q8_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
     MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);

@@ -488,20 +488,22 @@ class DbrxForCausalLM(nn.Module):
                 self.linear_method, UnquantizedLinearMethod
         ) and self.linear_method.quant_config.support_fused_moe():
             expert_params_mapping = [
-            # (param_name, weight_name, shard_id, expert_id)
-            ("ws" if weight_name in ["up_proj", "gate_proj"] else "w2s",
-             f"experts.mlp.{expert_id}.{weight_name}", shard_id, expert_id)
-            for expert_id in range(self.config.ffn_config.moe_num_experts)
-            for weight_name, shard_id in [("up_proj", 0), ("gate_proj", 1), ("down_proj", None)]
-            ]
-
+                ("ws" if weight_name in ["w1", "v1"] else "w2s",
+                f"experts.mlp.{weight_name}", shard_id)
+                for weight_name, shard_id in [("w1", 0), ("v1", 1), ("w2", None)]
+                ]
             for name, loaded_weight in hf_model_weights_iterator(
-                    model_name_or_path, cache_dir, load_format, revision):
-                for (param_name, weight_name, shard_id,
-                     expert_id) in expert_params_mapping:
+                    model_name_or_path,
+                    cache_dir,
+                    load_format,
+                    revision,
+                    fall_back_to_pt=False):
+                for (param_name, weight_name, shard_id) in expert_params_mapping:
                     if weight_name not in name:
                         continue
-                    name = name.replace(weight_name, param_name)
+                    original_name = name
+                    expert_id = int(name.split(".")[-2].split("_")[1])
+                    name = name.replace(weight_name + f"_{expert_id}", param_name)
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     param = params_dict[name]

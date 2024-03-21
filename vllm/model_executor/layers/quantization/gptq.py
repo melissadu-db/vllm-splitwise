@@ -238,7 +238,7 @@ class GPTQLinearMethod(LinearMethodBase):
                     w["exllama_state"] = ExllamaState.READY
                     ops.gptq_shuffle(w["qweight"], w["g_idx"],
                                     self.quant_config.weight_bits)
-        if x.shape[0] >= 128:
+        if True or x.shape[0] >= 128:
             dequant_w1 = ops.dequant_gptq(
                 w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
                 self.quant_config.weight_bits,
