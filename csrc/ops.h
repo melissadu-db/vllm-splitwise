@@ -152,7 +152,8 @@ torch::Tensor group_gptq_gemm(
     torch::Tensor expert_ids_ptr,
     torch::Tensor num_tokens_post_padded,
     bool mul_weights,
-    bool use_exllama
+    bool use_exllama,
+    int bit
 );
 
 torch::Tensor dequant_gptq(

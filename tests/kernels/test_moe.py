@@ -130,7 +130,7 @@ def test_mixtral_moe(dtype: torch.dtype):
 
 
 def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
-                   w2_zero, score, topk):
+                   w2_zero, score, topk, bits):
     score = torch.softmax(score.float(), dim=-1)
     topk_weight, topk_ids = torch.topk(score, topk)
     (B, D) = a.shape
@@ -145,9 +145,9 @@ def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
         mask = topk_ids == i
         if mask.sum():
             dw1 = ops.dequant_gptq(w1[i], w1_zero[i], w1_scale[i], w1_gidx[i],
-                                   4, False)
+                                   bits, False)
             dw2 = ops.dequant_gptq(w2[i], w2_zero[i], w2_scale[i], w2_gidx[i],
-                                   4, False)
+                                   bits, False)
             r1 = SiluAndMul()(torch.matmul(a[mask], dw1))
             out[mask] = torch.matmul(r1, dw2)
     return (out.view(B, -1, w2.shape[2]) *
@@ -163,16 +163,20 @@ def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
                          [ExllamaState.UNINITIALIZED, ExllamaState.UNUSED])
 @pytest.mark.parametrize("groupsize", [-1, 128])
 @pytest.mark.parametrize("actorder", [True, False])
+@pytest.mark.parametrize("bits", [4, 8])
 def test_fused_moe_gptq(m: int, n: int, k: int, e: int, topk: int,
-                        exstate: ExllamaState, groupsize: int, actorder: bool):
+                        exstate: ExllamaState, groupsize: int, actorder: bool, bits: int):
+    if bits == 8 and exstate == ExllamaState.UNUSED:
+        pytest.skip('8-bit group_gptq_gemm are not supported for exstate=UNUSED')
+
     RANGE = 1000000000
-    a = torch.randn((m, k), device='cuda', dtype=torch.half) / 10
+    a = torch.randn((m, k), device='cuda', dtype=torch.half) / 100
     qw1 = torch.randint(-RANGE,
-                        RANGE, (e, (k // 32) * 4, n * 2),
+                        RANGE, (e, (k // 32) * bits, n * 2),
                         dtype=torch.int,
                         device='cuda')
     qw2 = torch.randint(-RANGE,
-                        RANGE, (e, (n // 32) * 4, k),
+                        RANGE, (e, (n // 32) * bits, k),
                         dtype=torch.int,
                         device='cuda')
 
@@ -186,16 +190,16 @@ def test_fused_moe_gptq(m: int, n: int, k: int, e: int, topk: int,
                          device='cuda').unsqueeze(0).expand(e, n).contiguous()
 
     scale1 = torch.randn(
-        (e, k // groupsize1, n * 2), dtype=torch.half, device='cuda') / 50
+        (e, k // groupsize1, n * 2), dtype=torch.half, device='cuda') / 1000
     scale2 = torch.randn(
-        (e, n // groupsize2, k), dtype=torch.half, device='cuda') / 50
+        (e, n // groupsize2, k), dtype=torch.half, device='cuda') / 1000
 
     zero1 = torch.randint(-RANGE,
-                          RANGE, (e, k // groupsize1, (n * 2 // 32) * 4),
+                          RANGE, (e, k // groupsize1, (n * 2 // 32) * bits),
                           dtype=torch.int32,
                           device='cuda')
     zero2 = torch.randint(-RANGE,
-                          RANGE, (e, n // groupsize2, (k // 32) * 4),
+                          RANGE, (e, n // groupsize2, (k // 32) * bits),
                           dtype=torch.int32,
                           device='cuda')
     w1 = {
@@ -215,9 +219,9 @@ def test_fused_moe_gptq(m: int, n: int, k: int, e: int, topk: int,
 
     score = torch.randn((m, e), device='cuda', dtype=torch.half)
 
-    gptq_method = GPTQLinearMethod(GPTQConfig(4, groupsize, actorder))
+    gptq_method = GPTQLinearMethod(GPTQConfig(bits, groupsize, actorder))
     torch_output = torch_moe_gptq(a, qw1, gidx1, scale1, zero1, qw2, gidx2,
-                                  scale2, zero2, score, topk)
+                                  scale2, zero2, score, topk, bits)
     cuda_output = gptq_method.apply_moe_weights(w1, w2, a, score, topk, False)
     # gptq kernels have large variance in output
     assert torch.allclose(cuda_output, torch_output, atol=5e-2, rtol=0)
