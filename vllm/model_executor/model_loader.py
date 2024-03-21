@@ -22,11 +22,7 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 
 def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
     architectures = getattr(model_config.hf_config, "architectures", [])
-    # Special handling for quantized Mixtral.
-    # FIXME(woosuk): This is a temporary hack.
-    if (model_config.quantization is not None
-            and "MixtralForCausalLM" in architectures):
-        architectures = ["QuantMixtralForCausalLM"]
+    # Special handling for quantized DbrxForCausalLM.
     if (model_config.quantization is not None
             and "DbrxForCausalLM" in architectures):
         architectures = ["QuantDbrxForCausalLM"]

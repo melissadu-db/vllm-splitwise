@@ -32,7 +32,6 @@ _MODELS = {
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
-    "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "QuantDbrxForCausalLM": ("dbrx_quant", "DbrxForCausalLM"),
     # transformers's mpt class has lower case
