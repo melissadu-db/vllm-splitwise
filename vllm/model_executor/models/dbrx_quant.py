@@ -4,15 +4,15 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
+from typing import Callable
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear,
-                                               ReplicatedLinear)
+                                               ReplicatedLinear,
+                                               UnquantizedLinearMethod, MergedColumnParallelLinear)
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -28,45 +28,18 @@ from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.models.dbrx import DbrxRouter, DbrxFusedNormAttention
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class DbrxRouter(nn.Module):
-    """A Router implementation for Dbrx that returns logits for each expert
-    per token.
-    """
-
-    def __init__(
-        self,
-        config: DbrxConfig,
-        params_dtype: Optional[torch.dtype] = None,
-    ):
-        super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_total_experts = config.ffn_config.moe_num_experts
-        self.d_model = config.d_model
-        self.layer = ReplicatedLinear(self.d_model,
-                                      self.num_total_experts,
-                                      bias=False,
-                                      params_dtype=params_dtype,
-                                      linear_method=None)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        router_logits, _ = self.layer(hidden_states)
-        return router_logits
-
-
 class DbrxExperts(nn.Module):
-    """An expert-parallel MoE implementation for Dbrx that shards the
-    experts so that each rank has a num_experts/tp_degree experts.
+    """A tensor-parallel MoE implementation for DBRX that shards each expert
+    across all ranks.
 
-    Each rank computes its experts times the incoming hidden state and then
-    multiplies by the expert weight (which is 0 if the expert is unused).
-    This keeps the graph static, but is inefficient if less than
-    num_experts/tp_degree experts are used on each GPU.
-    
-    Finally we reduce the outputs across ranks.
+    Each expert's weights are sharded across all ranks and a fused MoE
+    kernel is used for the forward pass, and finally we reduce the outputs
+    across ranks.
     """
 
     def __init__(
@@ -76,194 +49,87 @@ class DbrxExperts(nn.Module):
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
-        self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = config.ffn_config.moe_num_experts
         self.top_k = config.ffn_config.moe_top_k
         self.d_model = config.d_model
-        self.intermediate_size = config.ffn_config.ffn_hidden_size
-
-        if self.tp_size > self.num_total_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {self.num_total_experts}.")
-        # Split experts equally between ranks
-        self.expert_indicies = np.array_split(range(
-            self.num_total_experts), self.tp_size)[self.rank].tolist()
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
+        self.linear_method = linear_method
+
         self.router = DbrxRouter(config, self.params_dtype)
 
-        self.w1 = nn.ModuleList([
-            ReplicatedLinear(self.d_model,
-                             self.intermediate_size,
-                             bias=False,
-                             linear_method=linear_method)
-                if idx in self.expert_indicies else None
-                for idx in range(self.num_total_experts)])
-        self.v1 = nn.ModuleList([
-            ReplicatedLinear(self.d_model,
-                             self.intermediate_size,
-                             bias=False,
-                             linear_method=linear_method)
-                if idx in self.expert_indicies else None
-                for idx in range(self.num_total_experts)])
-        self.w2 = nn.ModuleList([
-            ReplicatedLinear(self.intermediate_size,
-                             self.d_model,
-                             bias=False,
-                             linear_method=linear_method)
-                if idx in self.expert_indicies else None
-                for idx in range(self.num_total_experts)])
+        assert self.linear_method and not isinstance(
+                self.linear_method, UnquantizedLinearMethod
+        ) and self.linear_method.quant_config.support_fused_moe()
+        self.intermediate_size = config.ffn_config.ffn_hidden_size
 
-        # TODO: Use vllm's SiluAndMul
-        self.act_fn = nn.SiLU()
+        self.ws = MergedColumnParallelLinear(self.d_model,
+                                                [self.intermediate_size] * 2,
+                                                bias=False,
+                                                linear_method=linear_method,
+                                                num_experts=self.num_total_experts)
+        self.w2s = RowParallelLinear(self.intermediate_size,
+                                        self.d_model,
+                                        bias=False,
+                                        linear_method=linear_method,
+                                        num_experts=self.num_total_experts)
+
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+                      weight_name: str):
+        tp_rank = get_tensor_model_parallel_rank()
+        param_data = param.data
+        shard_size = self.intermediate_size
+        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+        if weight_name.endswith("w1"):
+            loaded_weight = torch.reshape(
+                loaded_weight,
+                [-1, self.intermediate_size * self.tp_size, self.d_model])
+            param_data[:, 0:shard_size, :] = loaded_weight[:, shard, :]
+        if weight_name.endswith("v1"):
+            loaded_weight = torch.reshape(
+                loaded_weight,
+                [-1, self.intermediate_size * self.tp_size, self.d_model])
+            param_data[:,
+                    shard_size:2 * shard_size, :] = loaded_weight[:,
+                                                                    shard, :]
+        if weight_name.endswith("w2"):
+            loaded_weight = torch.reshape(
+                loaded_weight,
+                [-1, self.intermediate_size * self.tp_size, self.d_model
+                ]).transpose(1, 2)
+            param_data[:] = loaded_weight[:, :, shard]
+
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.d_model)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.router(hidden_states)
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = None
-        for expert_idx in self.expert_indicies:
-            expert_mask = (selected_experts == expert_idx)
-            expert_weights = (routing_weights * expert_mask).sum(dim=-1,
-                                                                 keepdim=True)
-            w1_out, _ = self.w1[expert_idx](hidden_states)
-            w1_out = self.act_fn(w1_out)
-            v1_out, _ = self.v1[expert_idx](hidden_states)
-            current_hidden_states = w1_out * v1_out
-            current_hidden_states, _ = self.w2[expert_idx](current_hidden_states)
-            current_hidden_states = current_hidden_states.mul_(
-                expert_weights)
-            if final_hidden_states is None:
-                final_hidden_states = current_hidden_states
-            else:
-                final_hidden_states.add_(current_hidden_states)
+        assert self.linear_method and not isinstance(
+                self.linear_method, UnquantizedLinearMethod
+        ) and self.linear_method.quant_config.support_fused_moe()
 
-        return tensor_model_parallel_all_reduce(final_hidden_states).view(
-            batch_size, sequence_length, hidden_size)
-
-class DbrxAttention(nn.Module):
-
-    def __init__(
-        self,
-        config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
-        super().__init__()
-        self.d_model = config.d_model
-        self.total_num_heads = config.n_heads
-        self.head_dim = self.d_model // self.total_num_heads
-        self.total_num_kv_heads = config.attn_config.kv_n_heads
-        self.clip_qkv = config.attn_config.clip_qkv
-        self.rope_theta = config.attn_config.rope_theta
-        self.max_position = config.max_seq_len
-
-        # pylint: disable=invalid-name
-        self.Wqkv = QKVParallelLinear(
-            self.d_model,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            linear_method=linear_method,
-        )
-        self.out_proj = RowParallelLinear(
-            self.d_model,
-            self.d_model,
-            bias=False,
-            linear_method=linear_method,
-        )
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=self.max_position,
-            base=int(self.rope_theta),
-            is_neox_style=True,
+        final_hidden_states = self.linear_method.apply_moe_weights(
+            self.ws.linear_weights,
+            self.w2s.linear_weights,
+            hidden_states,
+            router_logits,
+            self.top_k,
+            renormalize=True,
         )
 
-        tp_world_size = get_tensor_model_parallel_world_size()
-        self.tp_size = tp_world_size
-        assert self.total_num_heads % tp_world_size == 0
-        self.num_heads = self.total_num_heads // tp_world_size
-        if self.total_num_kv_heads >= tp_world_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_world_size == 0
-        else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_world_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-        )
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
-    def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        qkv, _ = self.Wqkv(hidden_states)
-        if self.clip_qkv is not None:
-            qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=2)
-        q, k = self.rotary_emb(position_ids, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
-        hidden_states, _ = self.out_proj(attn_output)
-        return hidden_states
-
-
-class DbrxFusedNormAttention(nn.Module):
-
-    def __init__(
-        self,
-        config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
-        super().__init__()
-        self.d_model = config.d_model
-        self.attn = DbrxAttention(config, linear_method)
-        self.norm_1 = nn.LayerNorm(self.d_model)
-        self.norm_2 = nn.LayerNorm(self.d_model)
-
-    def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.norm_1(hidden_states)
-        x = self.attn(position_ids=position_ids,
-                      hidden_states=hidden_states,
-                      kv_cache=kv_cache,
-                      input_metadata=input_metadata)
-        hidden_states = residual + x
-        residual = hidden_states
-        hidden_states = self.norm_2(hidden_states)
-        return hidden_states, residual
-
+        return final_hidden_states.view(batch_size, sequence_length,
+                                        hidden_size)
 
 class DbrxBlock(nn.Module):
 
@@ -381,26 +247,51 @@ class DbrxForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
+
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+
+        assert self.linear_method and not isinstance(
+                self.linear_method, UnquantizedLinearMethod
+        ) and self.linear_method.quant_config.support_fused_moe()
         expert_params_mapping = [
             ("ws" if weight_name in ["w1", "v1"] else "w2s",
-             f"experts.mlp.{weight_name}")
-            for weight_name in ["w1", "v1", "w2"]
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+            f"experts.mlp.{weight_name}", shard_id)
+            for weight_name, shard_id in [("w1", 0), ("v1", 1), ("w2", None)]
+            ]
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
-            if "ffn.experts.mlp" in name:
-                name = name.replace("experts.mlp.w1_", "w1.")
-                name = name.replace("experts.mlp.v1_", "v1.")
-                name = name.replace("experts.mlp.w2_", "w2.")
-                if name not in params_dict:
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                fall_back_to_pt=False):
+            for (param_name, weight_name, shard_id) in expert_params_mapping:
+                if weight_name not in name:
+                    continue
+                original_name = name
+                expert_id = int(name.split(".")[-2].split("_")[1])
+                name = name.replace(weight_name + f"_{expert_id}", param_name)
+                if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                weight_loader = param.weight_loader
+
+                if shard_id is None:
+                    weight_loader(param,
+                                    loaded_weight,
+                                    expert_id=expert_id)
+                else:
+                    weight_loader(param,
+                                    loaded_weight,
+                                    shard_id,
+                                    expert_id=expert_id)
+                break
             else:
-                if name not in params_dict:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Skip experts that are not assigned to this worker.
+                if ("ffn.experts.mlp." in name
+                        and name not in params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
