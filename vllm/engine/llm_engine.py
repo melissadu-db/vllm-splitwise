@@ -3,8 +3,6 @@ from typing import Dict, Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer
 
-from transformers import PreTrainedTokenizer
-
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,

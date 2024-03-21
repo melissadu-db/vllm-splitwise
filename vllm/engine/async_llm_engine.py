@@ -7,8 +7,6 @@ from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
 
 from transformers import PreTrainedTokenizer
 
-from transformers import PreTrainedTokenizer
-
 from vllm.lora.request import LoRARequest
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs

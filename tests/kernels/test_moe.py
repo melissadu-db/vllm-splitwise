@@ -165,9 +165,11 @@ def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
 @pytest.mark.parametrize("actorder", [True, False])
 @pytest.mark.parametrize("bits", [4, 8])
 def test_fused_moe_gptq(m: int, n: int, k: int, e: int, topk: int,
-                        exstate: ExllamaState, groupsize: int, actorder: bool, bits: int):
+                        exstate: ExllamaState, groupsize: int, actorder: bool,
+                        bits: int):
     if bits == 8 and exstate == ExllamaState.UNUSED:
-        pytest.skip('8-bit group_gptq_gemm are not supported for exstate=UNUSED')
+        pytest.skip(
+            '8-bit group_gptq_gemm are not supported for exstate=UNUSED')
 
     RANGE = 1000000000
     a = torch.randn((m, k), device='cuda', dtype=torch.half) / 100

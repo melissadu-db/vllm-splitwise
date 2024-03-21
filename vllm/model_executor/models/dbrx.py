@@ -268,8 +268,7 @@ class DbrxBlock(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        self.norm_attn_norm = DbrxFusedNormAttention(
-            config, linear_method)
+        self.norm_attn_norm = DbrxFusedNormAttention(config, linear_method)
         self.ffn = DbrxExperts(config, linear_method)
 
     def forward(
@@ -302,10 +301,8 @@ class DbrxModel(nn.Module):
             config.vocab_size,
             config.d_model,
         )
-        self.blocks = nn.ModuleList([
-            DbrxBlock(config, linear_method)
-            for _ in range(config.n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [DbrxBlock(config, linear_method) for _ in range(config.n_layers)])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
             if hasattr(module, "bias") and isinstance(module.bias,

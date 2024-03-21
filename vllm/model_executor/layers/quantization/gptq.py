@@ -231,12 +231,12 @@ class GPTQLinearMethod(LinearMethodBase):
             if w["exllama_state"] == ExllamaState.UNINITIALIZED:
                 if self.quant_config.desc_act:
                     w["g_idx"] = torch.argsort(w["g_idx"],
-                                            dim=-1).to(torch.int)
+                                               dim=-1).to(torch.int)
                 else:
                     w["g_idx"] = torch.empty((1, 1), device="meta")
                 w["exllama_state"] = ExllamaState.READY
                 ops.gptq_shuffle(w["qweight"], w["g_idx"],
-                                self.quant_config.weight_bits)
+                                 self.quant_config.weight_bits)
         if x.shape[0] >= 128:
             dequant_w1 = ops.dequant_gptq(
                 w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
@@ -257,7 +257,8 @@ class GPTQLinearMethod(LinearMethodBase):
         gate_up = ops.group_gptq_gemm(
             x, w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
             topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
-            False, w1["exllama_state"] == ExllamaState.READY, self.quant_config.weight_bits)
+            False, w1["exllama_state"] == ExllamaState.READY,
+            self.quant_config.weight_bits)
 
         out = torch.empty((gate_up.shape[:-1] + (gate_up.shape[-1] // 2, )),
                           dtype=x.dtype,
@@ -268,6 +269,7 @@ class GPTQLinearMethod(LinearMethodBase):
                                   w2["scales"], w2["g_idx"], topk_weights,
                                   sorted_token_ids, expert_ids,
                                   num_tokens_post_padded, True,
-                                  w2["exllama_state"] == ExllamaState.READY, self.quant_config.weight_bits)
+                                  w2["exllama_state"] == ExllamaState.READY,
+                                  self.quant_config.weight_bits)
 
         return torch.sum(out, dim=1)
