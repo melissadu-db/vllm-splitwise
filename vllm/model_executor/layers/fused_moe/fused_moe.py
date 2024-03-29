@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
-    b_ptr,
+    qweight_ptr,
     c_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
@@ -45,6 +45,10 @@ def fused_moe_kernel(
     stride_bn,
     stride_cm,
     stride_cn,
+    stride_ze,
+    stride_zk,
+    stride_se,
+    stride_sn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -107,16 +111,26 @@ def fused_moe_kernel(
     token_mask = offs_token < num_valid_tokens
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    # TODO: we can add tl.max_contiguous(tl.multiple_of) for funsies later
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am +
                       offs_k[None, :] * stride_ak)
 
-    # TODO: tl.load here without write back to HBM
     off_experts = tl.load(expert_ids_ptr + pid_m)
-    b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
+    # load in my assigned experts
+    qweight_ptrs = qweight_ptr + off_experts * stride_be + (offs_k[:, None] // 4 * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
-    # 
-    #
+    # scales_ptrs = scales_ptr + offs_bn * stride_scales_n
+    # zeros_ptr = zeros_ptr + ((offs_bn // 4) * stride_zeros_n)
+    zeros_ptrs = zeros_ptr + off_experts * stride_ze + (offs_k[:1, None] * stride_zk + 
+                                                           offs_bn[None, :] * stride_bn // 4)
+    scales_ptrs = scales_ptr + off_experts * stride_se + (offs_k[:, None] * stride_sk +
+                                                            offs_bn[:, None] * stride_sn)
+
+    # NB: this is for 8-bit quantization
+    shifter = (offs_k % 4) * 8
+    zeros_shifter = (offs_bn % 4) * 8
+
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
@@ -133,14 +147,21 @@ def fused_moe_kernel(
                     (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                     other=0.0)
         # (K, N)
-        b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
+        qweight = tl.load(qweight_ptrs,
+                    mask=offs_k[:, None] < K // 4 - k * BLOCK_SIZE_K // 4,
                     other=0.0)
         # dequantization
             # load in zero points
             # load in scales
+        # TODO: fix strides
+        # weight_q = scale * (weight_8bit - zero_point)
+        zeros = tl.load(zeros_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0)
+        scales = tl.load(scales_ptrs, mask=offs_k[:, None] < K // 4 - k * BLOCK_SIZE_K // 4, other=0.0)
 
-            # weight_q = scale * (weight_8bit - zero_point)
+        zeros = (zeros >> zeros_shifter) & 0xF
+        zeros = (zeros + 1) * scales
+        b = (b >> shifter[:, None]) & 0xF
+        b = b * scales[None, :] - zeros[None, :]
         
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, b)
@@ -221,6 +242,7 @@ def moe_align_block_size(
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
+                            scales: torch.Tensor, zeros: torch.Tensor,
                             topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                             sorted_token_ids: torch.Tensor,
                             expert_ids: torch.Tensor,
@@ -241,7 +263,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        B.shape[1],
+        A.shape[-1],
         B.shape[2],
         sorted_token_ids.shape[0],
         topk_ids.numel(),
@@ -252,6 +274,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         B.stride(1),
         C.stride(1),
         C.stride(2),
+        zeros.stride(0),
+        zeros.stride(2),
+        scales.stride(0),
+        scales.stride(2),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
@@ -433,14 +459,16 @@ def fused_moe(
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    invoke_fused_moe_kernel(hidden_states, w1, intermediate_cache1,
+    invoke_fused_moe_kernel(hidden_states, w1_qweight.permute(0, 2, 1), intermediate_cache1,
+                            w1_scales, w1_qzeros,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
                             topk_ids.shape[1], config)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    invoke_fused_moe_kernel(intermediate_cache2, w2, intermediate_cache3,
+    invoke_fused_moe_kernel(intermediate_cache2, w2_qweight.permute(0, 2, 1), intermediate_cache3,
+                            w2_scales, w2_qzeros,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
                             config)
