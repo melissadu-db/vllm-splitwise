@@ -25,6 +25,10 @@ def fused_moe_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
+    # pointers to quantization state
+    zeros_ptr,
+    scales_ptr,
+    g_idx_ptr,
     # Matrix dimensions
     N,
     K,
@@ -107,10 +111,12 @@ def fused_moe_kernel(
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am +
                       offs_k[None, :] * stride_ak)
 
+    # TODO: tl.load here without write back to HBM
     off_experts = tl.load(expert_ids_ptr + pid_m)
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
-
+    # 
+    #
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
@@ -121,13 +127,21 @@ def fused_moe_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
+        # (M, K)
         a = tl.load(a_ptrs,
                     mask=token_mask[:, None] &
                     (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                     other=0.0)
+        # (K, N)
         b = tl.load(b_ptrs,
                     mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
                     other=0.0)
+        # dequantization
+            # load in zero points
+            # load in scales
+
+            # weight_q = scale * (weight_8bit - zero_point)
+        
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
@@ -327,8 +341,16 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
 
 def fused_moe(
     hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
+    # w1 quant state
+    w1_qweight: torch.Tensor,
+    w1_qzeros: torch.Tensor,
+    w1_scales: torch.Tensor,
+    w1_g_idx: torch.Tensor,
+    # w2 quant state
+    w2_qweight: torch.Tensor,
+    w2_qzeros: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w2_g_idx: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
