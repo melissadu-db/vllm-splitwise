@@ -15,11 +15,10 @@ from vllm.utils import is_hip
 logger = init_logger(__name__)
 
 
-@triton.jit
 def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
-    qweight_ptr,
+    qweight_ptr, # B
     c_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
@@ -48,6 +47,7 @@ def fused_moe_kernel(
     stride_ze,
     stride_zk,
     stride_se,
+    stride_sk,
     stride_sn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
@@ -242,7 +242,7 @@ def moe_align_block_size(
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-                            scales: torch.Tensor, zeros: torch.Tensor,
+                            scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor,
                             topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                             sorted_token_ids: torch.Tensor,
                             expert_ids: torch.Tensor,
@@ -263,9 +263,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        A.shape[-1],
-        B.shape[2],
-        sorted_token_ids.shape[0],
+        zeros,
+        scales,
+        g_idx,
+        A.shape[-1], # N
+        B.shape[2], # K
+        sorted_token_ids.shape[0], # EM
         topk_ids.numel(),
         A.stride(0),
         A.stride(1),
@@ -278,6 +281,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         zeros.stride(2),
         scales.stride(0),
         scales.stride(2),
+        scales.stride(1),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
