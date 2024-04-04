@@ -8,6 +8,5 @@ from vllm.transformers_utils.configs.starcoder2 import Starcoder2Config
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 __all__ = [
-    "ChatGLMConfig", "MPTConfig", "RWConfig", "Starcoder2Config",
-    "DbrxConfig"
+    "ChatGLMConfig", "MPTConfig", "RWConfig", "Starcoder2Config", "DbrxConfig"
 ]

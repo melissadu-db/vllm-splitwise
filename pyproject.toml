@@ -30,13 +30,15 @@ select = [
 ]
 ignore = [
     # star imports
-    "F405", "F403",
+    "F405",
+    "F403",
     # lambda expression assignment
     "E731",
     # .strip() with multi-character strings
     "B005",
     # Loop control variable not used within loop body
     "B007",
+    "E501", # Line too long, TODO: fix this
 ]
 
 [tool.mypy]

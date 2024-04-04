@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""DBRX configuration"""
+"""DBRX configuration."""
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from typing import Optional, Any
@@ -23,9 +24,9 @@ DBRX_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 
 class DbrxAttentionConfig(PretrainedConfig):
-    """
-    This is the configuration class to store the configuration of a [`DbrxAttention`] class. It is used to instantiate
-    attention layers according to the specified arguments, defining the layers architecture.
+    """This is the configuration class to store the configuration of a
+    [`DbrxAttention`] class. It is used to instantiate attention layers
+    according to the specified arguments, defining the layers architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
@@ -53,7 +54,7 @@ class DbrxAttentionConfig(PretrainedConfig):
         self.kv_n_heads = kv_n_heads
         self.rope_theta = rope_theta
 
-        for k in ['model_type']:
+        for k in ["model_type"]:
             if k in kwargs:
                 kwargs.pop(k)
         if len(kwargs) != 0:
@@ -70,9 +71,8 @@ class DbrxAttentionConfig(PretrainedConfig):
         if config_dict.get("model_type") == "dbrx":
             config_dict = config_dict["attn_config"]
 
-        if "model_type" in config_dict and hasattr(
-                cls,
-                "model_type") and config_dict["model_type"] != cls.model_type:
+        if ("model_type" in config_dict and hasattr(cls, "model_type")
+                and config_dict["model_type"] != cls.model_type):
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
                 f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
@@ -82,20 +82,19 @@ class DbrxAttentionConfig(PretrainedConfig):
 
 
 class DbrxFFNConfig(PretrainedConfig):
-    """
-    This is the configuration class to store the configuration of a [`DbrxFFN`] class. It is used to instantiate
-    feedforward layers according to the specified arguments, defining the layers architecture.
+    """This is the configuration class to store the configuration of a
+    [`DbrxFFN`] class. It is used to instantiate feedforward layers according
+    to the specified arguments, defining the layers architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
 
     Args:
-
     """
 
     def __init__(
         self,
-        ffn_act_fn: str = 'silu',
+        ffn_act_fn: str = "silu",
         ffn_hidden_size: int = 3584,
         moe_num_experts: int = 4,
         moe_top_k: int = 1,
@@ -115,7 +114,7 @@ class DbrxFFNConfig(PretrainedConfig):
         self.moe_normalize_expert_weights = moe_normalize_expert_weights
         self.uniform_expert_assignment = uniform_expert_assignment
 
-        for k in ['model_type']:
+        for k in ["model_type"]:
             if k in kwargs:
                 kwargs.pop(k)
         if len(kwargs) != 0:
@@ -132,9 +131,8 @@ class DbrxFFNConfig(PretrainedConfig):
         if config_dict.get("model_type") == "dbrx":
             config_dict = config_dict["ffn_config"]
 
-        if "model_type" in config_dict and hasattr(
-                cls,
-                "model_type") and config_dict["model_type"] != cls.model_type:
+        if ("model_type" in config_dict and hasattr(cls, "model_type")
+                and config_dict["model_type"] != cls.model_type):
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
                 f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
@@ -144,9 +142,9 @@ class DbrxFFNConfig(PretrainedConfig):
 
 
 class DbrxConfig(PretrainedConfig):
-    """
-    This is the configuration class to store the configuration of a [`DbrxModel`]. It is used to instantiate a Dbrx model
-    according to the specified arguments, defining the model architecture.
+    """This is the configuration class to store the configuration of a
+    [`DbrxModel`]. It is used to instantiate a Dbrx model according to the
+    specified arguments, defining the model architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
@@ -207,7 +205,7 @@ class DbrxConfig(PretrainedConfig):
         "num_attention_heads": "n_heads",
         "hidden_size": "d_model",
         "num_hidden_layers": "n_layers",
-        "max_position_embeddings": "max_seq_len"
+        "max_position_embeddings": "max_seq_len",
     }
 
     def __init__(
