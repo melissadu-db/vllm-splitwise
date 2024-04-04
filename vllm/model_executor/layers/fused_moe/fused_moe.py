@@ -270,18 +270,18 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         B.shape[2], # K
         sorted_token_ids.shape[0], # EM
         topk_ids.numel(),
-        A.stride(0),
-        A.stride(1),
-        B.stride(0),
-        B.stride(2),
-        B.stride(1),
-        C.stride(1),
-        C.stride(2),
-        zeros.stride(0),
-        zeros.stride(2),
-        scales.stride(0),
-        scales.stride(2),
-        scales.stride(1),
+        A.stride(0), # stride_am
+        A.stride(1), # stride_ak
+        B.stride(0), # stride_be
+        B.stride(2), # stride_bk
+        B.stride(1), # stride_bn
+        C.stride(1), # stride_cm
+        C.stride(2), # stride_cn
+        zeros.stride(0), # stride_ze
+        zeros.stride(2), # stride_zn
+        scales.stride(0), # stride_se
+        scales.stride(2), # stride_sk
+        scales.stride(1), # stride_sn
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,

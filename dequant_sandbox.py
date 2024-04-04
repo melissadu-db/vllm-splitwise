@@ -1,16 +1,14 @@
 import torch
 from vllm.model_executor.layers.fused_moe import moe_align_block_size, fused_topk
 from typing import Optional, Dict, Any
-import os
 import triton
 import triton.language as tl
 
-state = {}
-state_dir = "/mnt/workdisk/linden/vllm-private/quantized_weights"
-for file in os.listdir(state_dir):
-    if file.startswith("0") and "output" not in file:
-        state[file] = torch.load(os.path.join(state_dir, file))
-
+# state = {}
+# state_dir = "/mnt/workdisk/linden/vllm-private/quantized_weights"
+# for file in os.listdir(state_dir):
+#     if file.startswith("0") and "output" not in file:
+#         state[file] = torch.load(os.path.join(state_dir, file))
 
 @triton.jit
 def fused_moe_kernel(
@@ -159,9 +157,9 @@ def fused_moe_kernel(
 
         b = (qweight >> shifter[None, :]) & 0xFF
         b = (b - 127) * scales[:, None]
-        if pid == 0 and k == 0:
+        # if pid == 0 and k == 0:
             # tl.device_print("a: ", a)
-            tl.device_print("b: ", b)
+            # tl.device_print("b: ", b)
         
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, tl.trans(b))
@@ -190,26 +188,24 @@ def fused_moe_kernel(
 
 @triton.jit
 def dequant_kernel(
-    qweight_ptr, # B
-    out_ptr,
-    scales_ptr,
+    qweight_ptr, out_ptr, scales_ptr,
     # Matrix dimensions
-    N,
-    K,
+    E, K, N,
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
     # (A has M rows).
     stride_qe,
-    stride_qn,
     stride_qk,
+    stride_qn,
     stride_se,
     stride_sn,
-    stride_on,
+    stride_oe,
     stride_ok,
+    stride_on,
     # Meta-parameters
-    BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
 ):
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -234,61 +230,87 @@ def dequant_kernel(
     # if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         # return
 
-    offs_bn = (tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_bn = tl.arange(0, BLOCK_SIZE_N) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K) % K
 
     off_experts = 0
 
-    # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+    # (BLOCK_SIZE_K, BLOCK_SIZE_N)
+    n_idxs = offs_bn + pid * BLOCK_SIZE_N
+    # n_idxs = (offs_bn[None, :] + pid * BLOCK_SIZE_N)
     qweight_ptrs = qweight_ptr + off_experts * stride_qe + (
-        offs_k[None, :] // 4 * stride_qk 
-        + offs_bn[:, None] * stride_qn 
+        offs_k[:, None] * stride_qk
+        + n_idxs[None, :] * stride_qn
     )
 
-    scales_ptrs = scales_ptr + off_experts * stride_se + (offs_bn * stride_sn)
-    shifter = (offs_k % 4) * 8
+    scale_offsets = off_experts * stride_se + (offs_bn * stride_sn)
+    scales_ptrs = scales_ptr + scale_offsets
+    # shifter = (offs_bn % 4) * 8
     
     # TODO: add mask
-    qweight = tl.load(qweight_ptrs)
 
-    scales = tl.load(scales_ptrs, mask=offs_bn * stride_sn < N, other=0.0)
-    tl.device_print("scales: ", scales)
+    scales = tl.load(scales_ptrs, mask=n_idxs < N, other=0.0)
 
-    acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float16)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        qweight = tl.load(qweight_ptrs)
+        acc = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=tl.float16)
+        # b = (qweight >> shifter[:, None]) & 0xFF
+        # tl.device_print("b: ", b)
+        # b = (b - 127) * scales[None, :]
+        b = qweight * scales[None, :]
+        # tl.device_print('block k: ', k, ' b: ', b)
+        # tl.device_print("scales: ", scales)
+        acc += b  # TODO explicit cast to bf16 instead of using accumulator
+        # out_ptrs = out_ptr + offs_bn[:, None] * stride_on + offs_k[None, :] * stride_ok
+        k_idxs = offs_k[:, None] + k * BLOCK_SIZE_K
+        offsets = (n_idxs[None, :] * stride_on) + (k_idxs * stride_ok)
+        tl.store(out_ptr + offsets, acc)
+        # tl.store(out_ptrs, offsets)
+        
+        # Update qweight_ptrs
+        # qweight_ptrs += BLOCK_SIZE_K // 4 * stride_qk
+        qweight_ptrs += BLOCK_SIZE_K * stride_qk  # TODO just use k_idxs and n_idxs
 
-    b = (qweight >> shifter[None, :]) & 0xFF
-    tl.device_print("weights post shifting: ", b)
-    b = (b - 128) * scales[:, None]
-    acc += b
 
-    out_ptrs = out_ptr + offs_bn[:, None] * stride_on + offs_k[None, :] * stride_ok
-    tl.store(out_ptrs, acc)
+    # acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float16)
+
+    # b = (qweight >> shifter[None, :]) & 0xFF
+    # b = (b - 128) * scales[:, None]
+    # acc += b
+
+    # out_ptrs = out_ptr + offs_bn[:, None] * stride_on + offs_k[None, :] * stride_ok
+    # tl.store(out_ptrs, acc)
 
 def dequantize(qweights_EKN, scales):
+    # qweights_EKN = qweights_EKN.view(torch.uint8).permute(0, 2, 1)
+    E, K, N = qweights_EKN.shape
+    print(f"original shape: {qweights_EKN.shape}")
+    qweights_EKN = qweights_EKN.reshape((E, N, K)).view(dtype=torch.uint8).reshape((E, K * 4, N))
+    print(f"Shifted shape: {qweights_EKN.shape}")
     BLOCK_SIZE_K = 4
-    BLOCK_SIZE_N = 4
-    qweights_ENK = qweights_EKN.permute(0, 2, 1)
+    BLOCK_SIZE_N = 8
+    E, K, N = qweights_EKN.shape
+    # K = int(K * 4)
+    # N = N // 4
     out_buf = torch.empty(
-        (BLOCK_SIZE_N, BLOCK_SIZE_K), 
+        # (K, BLOCK_SIZE_N), 
+        (E, K, N),
         dtype=torch.float32,
-        device=qweights_ENK.device
+        device=qweights_EKN.device,
     )
-    print(f"{scales.shape=}")
     dequant_kernel[(1, 1, 1)](
-        qweights_ENK,
-        out_buf,
-        scales,
-        qweights_ENK.shape[1],
-        qweights_ENK.shape[2],
-        qweights_ENK.stride(0),
-        qweights_ENK.stride(1),
-        qweights_ENK.stride(2),
+        qweights_EKN, out_buf, scales,
+        E, K, N,
+        qweights_EKN.stride(0),
+        qweights_EKN.stride(1),
+        qweights_EKN.stride(2),
         scales.stride(0),
         scales.stride(2),
         out_buf.stride(0),
         out_buf.stride(1),
-        BLOCK_SIZE_N,
+        out_buf.stride(2),
         BLOCK_SIZE_K,
+        BLOCK_SIZE_N,
     )
     return out_buf
     
@@ -448,24 +470,24 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         **config,
     )
 
-top_k = 4
-E = 16
+# top_k = 4
+# E = 16
 
-torch.manual_seed(1)
+# torch.manual_seed(1)
 
-qweight = state['0_qweight.pt']
-qzeros = state['0_qzeros.pt']
-scales = state["0_scales.pt"]
-g_idx = state['0_g_idx.pt']
-dtype = scales.dtype
-print(f'Running with {dtype=}')
-T = 2
-E = 16
+# qweight = state['0_qweight.pt']
+# qzeros = state['0_qzeros.pt']
+# scales = state["0_scales.pt"]
+# g_idx = state['0_g_idx.pt']
+# dtype = scales.dtype
+# print(f'Running with {dtype=}')
+# T = 2
+# E = 16
 
-x = torch.rand((T, 6144), dtype=dtype).to(qweight.device)
-gating_output = torch.rand((T, E), dtype=dtype).to(x.device)
-dequantized = dequantize(qweight, scales)
-print(f"{dequantized=}")
+# x = torch.rand((T, 6144), dtype=dtype).to(qweight.device)
+# gating_output = torch.rand((T, E), dtype=dtype).to(x.device)
+# dequantized = dequantize(qweight, scales)
+# torch.set_printoptions(profile="full")
 
 
 # fused_moe(
