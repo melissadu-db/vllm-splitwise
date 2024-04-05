@@ -1528,9 +1528,9 @@ __global__ void reconstruct_gptq_kernel
 )
 {
     if (blockIdx.z > 0){
-        w = w + blockIdx.z * height * width / 8;
+        w = w + blockIdx.z * height * width / (32 / bit);
         w_scales = w_scales + blockIdx.z * group * width;
-        w_zeros = w_zeros + blockIdx.z * group * width / 8;
+        w_zeros = w_zeros + blockIdx.z * group * width / (32 / bit);
         g_idx = g_idx + blockIdx.z * height;
         out = out + blockIdx.z * height * width;
     }
