@@ -4,11 +4,6 @@ from typing import Optional, Dict, Any
 import triton
 import triton.language as tl
 
-# state = {}
-# state_dir = "/mnt/workdisk/linden/vllm-private/quantized_weights"
-# for file in os.listdir(state_dir):
-#     if file.startswith("0") and "output" not in file:
-#         state[file] = torch.load(os.path.join(state_dir, file))
 
 @triton.jit
 def fused_moe_kernel(
@@ -187,132 +182,149 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 @triton.jit
-def dequant_kernel(
-    qweight_ptr, out_ptr, scales_ptr,
-    # Matrix dimensions
-    E, K, N,
-    # The stride variables represent how much to increase the ptr by when
-    # moving by 1 element in a particular dimension. E.g. `stride_am` is
-    # how much to increase `a_ptr` by to get the element one row down
-    # (A has M rows).
-    stride_qe,
-    stride_qk,
-    stride_qn,
-    stride_se,
-    stride_sn,
-    stride_oe,
-    stride_ok,
-    stride_on,
-    # Meta-parameters
-    BLOCK_SIZE_K: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
+def dequant_kernel_248(
+    g_idx_ptr, scales_ptr, qweight_ptr, qzeros_ptr, expert_ids_ptr, out_ptr,
+    maxq: tl.constexpr,
+    outfeatures: tl.constexpr,
+    num_groups: tl.constexpr,
+    EM, N, K,
+    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    # strides
+    stride_qe: tl.constexpr, stride_qk: tl.constexpr, stride_qn: tl.constexpr,
+    stride_se: tl.constexpr,
+    stride_ok: tl.constexpr, stride_on: tl.constexpr,
+    num_bits: int,
 ):
-    # -----------------------------------------------------------
-    # Map program ids `pid` to the block of C it should compute.
-    # This is done in a grouped ordering to promote L2 data reuse.
+    # Block indexing from triton matmul tutorial for 
+    # L2 cache reuse
     pid = tl.program_id(axis=0)
-    # num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    # num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    # num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    # group_id = pid // num_pid_in_group
-    # first_pid_m = group_id * GROUP_SIZE_M
-    # group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    # pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    # pid_n = (pid % num_pid_in_group) // group_size_m
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # ----------------------------------------------------------
-    # Create pointers for the first blocks of A and B.
-    # We will advance this pointer as we move in the K direction
-    # and accumulate
-    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
-    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
-    # num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
-    # if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
-        # return
+    if pid_m != 0:
+        return
 
-    offs_bn = tl.arange(0, BLOCK_SIZE_N) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K) % K
+    numel_per_i32 = 32 // num_bits
 
-    off_experts = 0
+    # Offsets of the block for the output dimension
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    # Offsets of k relative to the entire input dimension (not packed)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    q_offs_k = offs_k // numel_per_i32
+    qweight_shifts = (offs_k % numel_per_i32) * num_bits 
+    qzero_shifts = (offs_bn % numel_per_i32) * num_bits
 
-    # (BLOCK_SIZE_K, BLOCK_SIZE_N)
-    n_idxs = offs_bn + pid * BLOCK_SIZE_N
-    # n_idxs = (offs_bn[None, :] + pid * BLOCK_SIZE_N)
-    qweight_ptrs = qweight_ptr + off_experts * stride_qe + (
-        offs_k[:, None] * stride_qk
-        + n_idxs[None, :] * stride_qn
+    # off_experts = tl.load(expert_ids_ptr + pid_m)
+    off_experts = 0  # for now, dequantize expert 0
+    qweight_ptrs = qweight_ptr + off_experts * stride_qe + (q_offs_k[:, None] * stride_qk +
+                                                offs_bn[None, :] * stride_qn)
+
+    row_idxs = q_offs_k
+    col_idxs = offs_bn
+    # row_idx = x_index // outfeatures
+    # col_idx = x_index % outfeatures
+
+    # (BLOCK_SIZE_K, )
+    g_idx = tl.load(g_idx_ptr + row_idxs, None, eviction_policy="evict_last")
+
+    # wf_weights = (row_idx % elements_per_feature) * bits
+    # wf_zeros = (col_idx % elements_per_feature) * bits
+
+    tmp1 = g_idx + num_groups
+    tmp2 = g_idx < 0
+    tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
+    groups = tl.where(tmp2, tmp1, g_idx)  # tmp3 are g_idx
+
+    scales = tl.load(scales_ptr + off_experts * stride_se + offs_bn, None).to(
+        tl.float32
     )
 
-    scale_offsets = off_experts * stride_se + (offs_bn * stride_sn)
-    scales_ptrs = scales_ptr + scale_offsets
-    # shifter = (offs_bn % 4) * 8
-    
-    # TODO: add mask
-
-    scales = tl.load(scales_ptrs, mask=n_idxs < N, other=0.0)
-
+    # Unpack zeros
+    qzero_ncols: tl.constexpr = outfeatures // numel_per_i32
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        qweight = tl.load(qweight_ptrs)
-        acc = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=tl.float16)
-        # b = (qweight >> shifter[:, None]) & 0xFF
-        # tl.device_print("b: ", b)
-        # b = (b - 127) * scales[None, :]
-        b = qweight * scales[None, :]
-        # tl.device_print('block k: ', k, ' b: ', b)
-        # tl.device_print("scales: ", scales)
-        acc += b  # TODO explicit cast to bf16 instead of using accumulator
-        # out_ptrs = out_ptr + offs_bn[:, None] * stride_on + offs_k[None, :] * stride_ok
-        k_idxs = offs_k[:, None] + k * BLOCK_SIZE_K
-        offsets = (n_idxs[None, :] * stride_on) + (k_idxs * stride_ok)
-        tl.store(out_ptr + offsets, acc)
-        # tl.store(out_ptrs, offsets)
+        # Unpack weights
+        qweights = tl.load(qweight_ptrs, None)
+        weights = qweights >> qweight_shifts[:, None]  # bit shift qweight
+
+        weights = weights & maxq
+
+        qzeros = tl.load(
+            # qzeros_ptr + ((qzero_ncols * groups) + (offs_bn // numel_per_i32)),
+            # assuming there's one group?
+            qzeros_ptr + (offs_bn // numel_per_i32),
+            None,
+            eviction_policy="evict_last",
+        )
+        zeros = qzeros >> qzero_shifts
+        zeros = zeros & maxq
+
+        # Dequantize
+        zeros = zeros + 1
+        weights = weights - zeros
+        weights = weights.to(tl.float32)
+        weights = scales * weights
+
+        tl.store(out_ptr + (
+            (offs_k[:, None] + k * BLOCK_SIZE_K) * stride_ok + 
+            offs_bn[None, :] * stride_on
+        ), weights)
         
-        # Update qweight_ptrs
-        # qweight_ptrs += BLOCK_SIZE_K // 4 * stride_qk
-        qweight_ptrs += BLOCK_SIZE_K * stride_qk  # TODO just use k_idxs and n_idxs
+        qweight_ptrs += BLOCK_SIZE_K // numel_per_i32 * stride_qk
+        # offs_k += BLOCK_SIZE_K
 
 
-    # acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float16)
 
-    # b = (qweight >> shifter[None, :]) & 0xFF
-    # b = (b - 128) * scales[:, None]
-    # acc += b
+def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
+    """
+    Launcher for triton dequant kernel.  Only valid for bits = 2, 4, 8
+    """
 
-    # out_ptrs = out_ptr + offs_bn[:, None] * stride_on + offs_k[None, :] * stride_ok
-    # tl.store(out_ptrs, acc)
+    # permute, similar to how we do in the fused_moe kernel
+    # the shape is (E, N, K) but since this is a torch permute,
+    # the data layout is still (E, K, N)
+    print(f"incoming qweight shape: {qweight.shape}")
+    qweight = qweight.permute(0, 2, 1) 
 
-def dequantize(qweights_EKN, scales):
-    # qweights_EKN = qweights_EKN.view(torch.uint8).permute(0, 2, 1)
-    E, K, N = qweights_EKN.shape
-    print(f"original shape: {qweights_EKN.shape}")
-    qweights_EKN = qweights_EKN.reshape((E, N, K)).view(dtype=torch.uint8).reshape((E, K * 4, N))
-    print(f"Shifted shape: {qweights_EKN.shape}")
-    BLOCK_SIZE_K = 4
-    BLOCK_SIZE_N = 8
-    E, K, N = qweights_EKN.shape
-    # K = int(K * 4)
-    # N = N // 4
-    out_buf = torch.empty(
-        # (K, BLOCK_SIZE_N), 
-        (E, K, N),
-        dtype=torch.float32,
-        device=qweights_EKN.device,
-    )
-    dequant_kernel[(1, 1, 1)](
-        qweights_EKN, out_buf, scales,
-        E, K, N,
-        qweights_EKN.stride(0),
-        qweights_EKN.stride(1),
-        qweights_EKN.stride(2),
+    num_groups = scales.shape[0]
+    outfeatures = scales.shape[2]
+    infeatures = g_idx.shape[1]
+    num_tokens = 128
+
+    out = torch.empty((infeatures, outfeatures), device="cuda", dtype=torch.float16)
+    numels = out.numel()
+    maxq = 2**bits - 1 if maxq is None else maxq
+    # grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
+    grid = lambda META: (triton.cdiv(num_tokens, META[
+        'BLOCK_SIZE_M']) * triton.cdiv(qweight.shape[1], META['BLOCK_SIZE_N']), )
+    
+
+    E, N, K = qweight.shape
+    print(f"{E=} {N=} {K=}")
+    expert_ids = None
+    BLOCK_SIZE_N = 32
+    BLOCK_SIZE_K = 16
+    BLOCK_SIZE_M = 64
+    GROUP_SIZE_M = 1
+    dequant_kernel_248[grid](
+        g_idx, scales, qweight, qzeros, expert_ids, out,
+        maxq,
+        outfeatures,
+        num_groups,
+        4, outfeatures, infeatures,
+        BLOCK_SIZE_N, BLOCK_SIZE_K, BLOCK_SIZE_M, GROUP_SIZE_M,
+        qweight.stride(0), qweight.stride(2), qweight.stride(1),
         scales.stride(0),
-        scales.stride(2),
-        out_buf.stride(0),
-        out_buf.stride(1),
-        out_buf.stride(2),
-        BLOCK_SIZE_K,
-        BLOCK_SIZE_N,
+        out.stride(0), out.stride(1),
+        bits
     )
-    return out_buf
+    return out
     
 
 def fused_moe(
