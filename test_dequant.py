@@ -1,3 +1,4 @@
+import time
 import torch
 from vllm._C import ops
 from dequant_baseline import dequant248 as dequant_ref
@@ -23,38 +24,34 @@ def test_custom_dequant():
 def test_fused_moe():
     torch.manual_seed(1)
     num_bits = 8
-    seq_len = 4
-    num_experts = 2
-    topk = 1
+    seq_len = 128
+    num_experts = 16
+    topk = 4
 
 
     qweight, scales, zeros, g_idx = load_inputs()
-    qweight, scales, zeros, g_idx = qweight[:num_experts], scales[:num_experts], zeros[:num_experts], g_idx[:num_experts]
-
-    # scales.fill_(1.0)
-    # zeros.fill_(1)
-    # zeros = torch.zeros_like(zeros)
 
     dtype = scales.dtype
     x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight.device)
     gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight.device)
 
-    dequant_w1 = ops.dequant_gptq(
-        qweight, zeros, scales, torch.zeros_like(g_idx), num_bits, False
-    ).permute(0, 2, 1)
-    print(f"{dequant_w1}")
-    ref_output = fused_moe_ref(x, dequant_w1, gating_output, topk, True)
-    # print(ref_output)
+    for _ in range(10):
+        tick = time.time()
+        dequant_w1 = ops.dequant_gptq(
+            qweight, zeros, scales, torch.zeros_like(g_idx), num_bits, False
+        ).permute(0, 2, 1)
+        ref_output = fused_moe_ref(x, dequant_w1, gating_output, topk, True)
+        tock = time.time()
+        ref_time = tock - tick
 
-    # scales.fill_(1.0)
-    # zeros.fill_(1)
-    fused_output = fused_moe_custom(x, qweight, scales, zeros, torch.zeros_like(g_idx), gating_output, topk, True, num_bits)
-    
-    # print(fused_output)
+    for _ in range(10):
+        tick = time.time()
+        fused_output = fused_moe_custom(x, qweight, scales, zeros, torch.zeros_like(g_idx), gating_output, topk, True, num_bits)
+        tock = time.time()
+        custom_time = tock - tick
     diff = ref_output - fused_output
-    print(f"{ref_output=}")
-    print(f"{fused_output=}")
-    print(f"{100 * torch.count_nonzero(diff) / diff.numel()}% difference between ref and custom")
+    assert torch.count_nonzero(diff) == 0
+    print(f"Speedup: {ref_time / custom_time:.2f}x")
     
 
 def test_dequant():

@@ -381,12 +381,6 @@ def fused_moe(
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
-    print(f"FUSED_MOE {'-' * 80}")
-    print(f"{sorted_token_ids=}")
-    print(f"{expert_ids=}")
-    print(f"{'-' * 80}")
-    # print(f"FUSED MOE {sorted_token_ids.shape}")
-    assert num_tokens_post_padded % config['BLOCK_SIZE_M'] == 0, "fused moe is broken"
 
     invoke_fused_moe_kernel(hidden_states, w1, intermediate_cache1,
                             topk_weights, topk_ids, sorted_token_ids,
