@@ -1,144 +1,10 @@
 import torch
 from vllm.model_executor.layers.fused_moe import moe_align_block_size, fused_topk
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 import triton
 import triton.language as tl
+from vllm._C import ops
 
-@triton.jit
-def dequant_kernel_248(
-    g_idx_ptr, scales_ptr, qweight_ptr, qzeros_ptr, expert_ids_ptr, out_ptr,
-    maxq: tl.constexpr,
-    outfeatures: tl.constexpr,
-    num_groups: tl.constexpr,
-    EM, N, K,
-    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    # strides
-    stride_qe: tl.constexpr, stride_qk: tl.constexpr, stride_qn: tl.constexpr,
-    stride_se: tl.constexpr,
-    stride_ok: tl.constexpr, stride_on: tl.constexpr,
-    stride_ze,
-    num_bits: int,
-):
-    # Block indexing from triton matmul tutorial for 
-    # L2 cache reuse
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
-    if pid_m != 0:
-        return
-
-    numel_per_i32 = 32 // num_bits
-
-    # Offsets of the block for the output dimension
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    # Offsets of k relative to the entire input dimension (not packed)
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    q_offs_k = offs_k // numel_per_i32
-    qweight_shifts = (offs_k % numel_per_i32) * num_bits 
-    qzero_shifts = (offs_bn % numel_per_i32) * num_bits
-
-    # off_experts = tl.load(expert_ids_ptr + pid_m)
-    off_experts = 1  # for now, dequantize expert 0
-    qweight_ptrs = qweight_ptr + off_experts * stride_qe + (q_offs_k[:, None] * stride_qk +
-                                                offs_bn[None, :] * stride_qn)
-
-
-    # (BLOCK_SIZE_K, )
-    # g_idx = tl.load(g_idx_ptr + row_idxs, None, eviction_policy="evict_last")
-
-
-    # tmp1 = g_idx + num_groups
-    # tmp2 = g_idx < 0
-    # tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
-    # groups = tl.where(tmp2, tmp1, g_idx)  # tmp3 are g_idx
-
-    scales = tl.load(scales_ptr + off_experts * stride_se + offs_bn, None).to(
-        tl.float32
-    )
-
-    qzeros = tl.load(
-        # qzeros_ptr + ((qzero_ncols * groups) + (offs_bn // numel_per_i32)),
-        # assuming there's one group?
-        qzeros_ptr + off_experts * stride_ze + (offs_bn // numel_per_i32),
-        None,
-        eviction_policy="evict_last",
-    )
-    zeros = (qzeros >> qzero_shifts) & maxq
-    zeros = (zeros + 1) * scales
-
-    # Unpack zeros
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Unpack weights
-        qweights = tl.load(qweight_ptrs, None)
-        weights = (qweights >> qweight_shifts[:, None]) & maxq  # bit shift qweight
-        # weights = weights & maxq
-        # weights = weights - zeros
-        weights = scales * weights - zeros
-        weights = weights.to(tl.float16)
-
-        tl.store(out_ptr + (
-            (offs_k[:, None] + k * BLOCK_SIZE_K) * stride_ok + 
-            offs_bn[None, :] * stride_on
-        ), weights)
-        
-        qweight_ptrs += BLOCK_SIZE_K // numel_per_i32 * stride_qk
-
-
-
-def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
-    """
-    Launcher for triton dequant kernel.  Only valid for bits = 2, 4, 8
-    """
-
-    # permute, similar to how we do in the fused_moe kernel
-    # the shape is (E, N, K) but since this is a torch permute,
-    # the data layout is still (E, K, N)
-    print(f"incoming qweight shape: {qweight.shape}")
-    qweight = qweight.permute(0, 2, 1) 
-
-    num_groups = scales.shape[0]
-    outfeatures = scales.shape[2]
-    infeatures = g_idx.shape[1]
-    num_tokens = 128
-
-    out = torch.empty((infeatures, outfeatures), device="cuda", dtype=torch.float16)
-    numels = out.numel()
-    maxq = 2**bits - 1 if maxq is None else maxq
-    # grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
-    grid = lambda META: (triton.cdiv(num_tokens, META[
-        'BLOCK_SIZE_M']) * triton.cdiv(qweight.shape[1], META['BLOCK_SIZE_N']), )
-    
-
-    expert_ids = None
-    BLOCK_SIZE_N = 32
-    BLOCK_SIZE_K = 16
-    BLOCK_SIZE_M = 64
-    GROUP_SIZE_M = 1
-    dequant_kernel_248[grid](
-        g_idx, scales, qweight, qzeros, expert_ids, out,
-        maxq,
-        outfeatures,
-        num_groups,
-        4, outfeatures, infeatures,
-        BLOCK_SIZE_N, BLOCK_SIZE_K, BLOCK_SIZE_M, GROUP_SIZE_M,
-        qweight.stride(0), qweight.stride(2), qweight.stride(1),
-        scales.stride(0),
-        out.stride(0), out.stride(1),
-        qzeros.stride(0),
-        bits,
-        num_warps=8,
-        num_stages=1
-    )
-    return out
-    
 
 @triton.jit()
 def fused_moe_kernel(
@@ -218,8 +84,6 @@ def fused_moe_kernel(
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
     token_mask = offs_token < num_valid_tokens # (BLOCK_SIZE_M, )
 
-        # offs_am = tl.max_contiguous(tl.multiple_of(offs_m, block_size_m), block_size_m)
-    # offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, block_size_n), block_size_n)
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
@@ -242,8 +106,7 @@ def fused_moe_kernel(
     scales = tl.load(
         qscales_ptr + off_experts * stride_se + offs_bn, 
         mask=offs_bn < N,
-        # None
-    )#.to(tl.float16)
+    )
 
     qzeros = tl.load(
         # qzeros_ptr + ((qzero_ncols * groups) + (offs_bn // numel_per_i32)),
@@ -263,9 +126,6 @@ def fused_moe_kernel(
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # tl.device_print("k: ", k)
-        # Load the next block of A and B, generate a mask by checking the
-        # K dimension.
         x = tl.load(x_ptrs,
                     mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                     other=0.0)
@@ -282,8 +142,6 @@ def fused_moe_kernel(
 
         weights = weights.to(tl.float16)
         x = x.to(tl.float16)
-        # if off_experts == 0 and pid_m == 1:
-            # tl.device_print("x for expert 0: ", x)
         accumulator += tl.dot(x, weights)
 
         x_ptrs += BLOCK_SIZE_K * stride_xk
@@ -300,13 +158,10 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_on = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    # offs_on = tl.arange(0, BLOCK_SIZE_N)
     out_ptrs = out_ptr + stride_om * offs_token[:, None] + stride_on * offs_on[
         None, :]
     c_mask = token_mask[:, None] & (offs_on[None, :] < N)
-    # tl.device_print("about to store")
     tl.store(out_ptrs, accumulator, mask=c_mask)
-    # tl.device_print("successfully stored")
 
 
 def invoke_fused_moe_kernel(
@@ -356,11 +211,14 @@ def invoke_fused_moe_kernel(
 
 def fused_moe(
     hidden_states: torch.Tensor,
-    qweights: torch.Tensor, qscales: torch.Tensor, qzeros: torch.Tensor, g_idx: torch.Tensor,
+    qweights1: torch.Tensor, qscales1: torch.Tensor, qzeros1: torch.Tensor, g_idx1: torch.Tensor,
+    qweights2: torch.Tensor, qscales2: torch.Tensor, qzeros2: torch.Tensor, g_idx2: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    num_bits: int = 8
+    inplace: bool=True,
+    num_bits: int = 8,
+    override_config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -386,7 +244,7 @@ def fused_moe(
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
     # assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
-    assert gating_output.shape[1] == qweights.shape[0], "Number of experts mismatch"
+    assert gating_output.shape[1] == qweights1.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     # assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     # assert w2.is_contiguous(), "Expert weights2 must be contiguous"
@@ -394,10 +252,10 @@ def fused_moe(
         torch.float32, torch.float16, torch.bfloat16
     ]
     # permute qweights
-    qweights = qweights.permute(0, 2, 1)
+    qweights1 = qweights1.permute(0, 2, 1)
 
     M, _ = hidden_states.shape
-    E, N, _ = qweights.shape
+    E, N, _ = qweights1.shape
 
     topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
 
@@ -412,44 +270,31 @@ def fused_moe(
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
+    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+
+    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    invoke_fused_moe_kernel(hidden_states, qweights, qscales, qzeros, g_idx, intermediate_cache1,
+    invoke_fused_moe_kernel(hidden_states, qweights1, qscales1, qzeros1, g_idx1, intermediate_cache1,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
                             topk_ids.shape[1], num_bits, config)
 
-    return intermediate_cache1
+    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-# top_k = 4
-# E = 16
-
-# torch.manual_seed(1)
-
-# qweight = state['0_qweight.pt']
-# qzeros = state['0_qzeros.pt']
-# scales = state["0_scales.pt"]
-# g_idx = state['0_g_idx.pt']
-# dtype = scales.dtype
-# print(f'Running with {dtype=}')
-# T = 2
-# E = 16
-
-# x = torch.rand((T, 6144), dtype=dtype).to(qweight.device)
-# gating_output = torch.rand((T, E), dtype=dtype).to(x.device)
-# dequantized = dequantize(qweight, scales)
-# torch.set_printoptions(profile="full")
-
-
-# fused_moe(
-#     x,
-#     qweight,
-#     qzeros,
-#     scales,
-#     g_idx,
-#     gating_output,
-#     topk=top_k,
-#     renormalize=True,
-#     inplace=True,
-# )
+    invoke_fused_moe_kernel(intermediate_cache2, qweights2, qscales2, qzeros2, g_idx2, intermediate_cache3,
+                            topk_weights, topk_ids, sorted_token_ids,
+                            expert_ids, num_tokens_post_padded, True, 1, num_bits, 8)
+    
+    if inplace:
+        return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                         dim=1,
+                         out=hidden_states)
+    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                     dim=1)

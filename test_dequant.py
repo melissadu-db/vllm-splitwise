@@ -4,6 +4,8 @@ from vllm._C import ops
 from dequant_baseline import dequant248 as dequant_ref
 from dequant_sandbox import dequant248 as dequant_custom, fused_moe as fused_moe_custom
 from fused_moe_baseline import fused_moe as fused_moe_ref
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
+from vllm.model_executor.layers.fused_moe.quant_fused_moe import fused_moe as fused_moe_vllm_quant
 import numpy as np
 
 def load_inputs():
@@ -21,6 +23,29 @@ def test_custom_dequant():
     diff = autogptq - custom
     assert torch.count_nonzero(diff) == 0
 
+def test_full_fused_moe():
+    qweight1, scales1, zeros1, g_idx1 = load_inputs()
+    qweight2, scales2, zeros2, g_idx2 = load_inputs()
+    num_bits = 8
+    seq_len = 128
+    num_experts = 16
+    topk = 4
+
+    dtype = scales1.dtype
+    x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight1.device)
+    gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight1.device)
+
+    dequant_w1 = ops.dequant_gptq(
+        qweight1, zeros1, scales1, torch.zeros_like(g_idx1), num_bits, False
+    ).permute(0, 2, 1)
+    dequant_w2 = ops.dequant_gptq(
+        w2["qweight"], w2["qzeros"], w2["scales"], w2["g_idx"], num_bits, False
+    ).permute(0, 2, 1)
+    ref_output = fused_moe_vllm(x, dequant_w1, dequant_w2, gating_output, topk, True)
+
+
+
+
 def test_fused_moe():
     torch.manual_seed(1)
     num_bits = 8
@@ -28,12 +53,17 @@ def test_fused_moe():
     num_experts = 16
     topk = 4
 
-
     qweight, scales, zeros, g_idx = load_inputs()
-
     dtype = scales.dtype
+
     x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight.device)
     gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight.device)
+
+    for _ in range(10):
+        tick = time.time()
+        fused_output = fused_moe_custom(x, qweight, scales, zeros, g_idx, gating_output, topk, True, num_bits)
+        tock = time.time()
+        custom_time = tock - tick
 
     for _ in range(10):
         tick = time.time()
@@ -43,15 +73,13 @@ def test_fused_moe():
         ref_output = fused_moe_ref(x, dequant_w1, gating_output, topk, True)
         tock = time.time()
         ref_time = tock - tick
-
-    for _ in range(10):
-        tick = time.time()
-        fused_output = fused_moe_custom(x, qweight, scales, zeros, torch.zeros_like(g_idx), gating_output, topk, True, num_bits)
-        tock = time.time()
-        custom_time = tock - tick
-    diff = ref_output - fused_output
-    assert torch.count_nonzero(diff) == 0
+    
     print(f"Speedup: {ref_time / custom_time:.2f}x")
+
+
+    diff = ref_output - fused_output
+
+    assert torch.count_nonzero(diff) == 0
     
 
 def test_dequant():
