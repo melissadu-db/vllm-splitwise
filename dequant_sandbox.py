@@ -17,6 +17,7 @@ def dequant_kernel_248(
     stride_qe: tl.constexpr, stride_qk: tl.constexpr, stride_qn: tl.constexpr,
     stride_se: tl.constexpr,
     stride_ok: tl.constexpr, stride_on: tl.constexpr,
+    stride_ze,
     num_bits: int,
 ):
     # Block indexing from triton matmul tutorial for 
@@ -45,11 +46,10 @@ def dequant_kernel_248(
     qzero_shifts = (offs_bn % numel_per_i32) * num_bits
 
     # off_experts = tl.load(expert_ids_ptr + pid_m)
-    off_experts = 0  # for now, dequantize expert 0
+    off_experts = 1  # for now, dequantize expert 0
     qweight_ptrs = qweight_ptr + off_experts * stride_qe + (q_offs_k[:, None] * stride_qk +
                                                 offs_bn[None, :] * stride_qn)
 
-    row_idxs = q_offs_k
 
     # (BLOCK_SIZE_K, )
     # g_idx = tl.load(g_idx_ptr + row_idxs, None, eviction_policy="evict_last")
@@ -67,30 +67,22 @@ def dequant_kernel_248(
     qzeros = tl.load(
         # qzeros_ptr + ((qzero_ncols * groups) + (offs_bn // numel_per_i32)),
         # assuming there's one group?
-        qzeros_ptr + (offs_bn // numel_per_i32),
+        qzeros_ptr + off_experts * stride_ze + (offs_bn // numel_per_i32),
         None,
         eviction_policy="evict_last",
     )
-    zeros = qzeros >> qzero_shifts
-    zeros = zeros & maxq
+    zeros = (qzeros >> qzero_shifts) & maxq
+    zeros = (zeros + 1) * scales
 
-    # Dequantize
-    zeros = zeros + 1
     # Unpack zeros
-    qzero_ncols: tl.constexpr = outfeatures // numel_per_i32
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Unpack weights
         qweights = tl.load(qweight_ptrs, None)
-        weights = qweights >> qweight_shifts[:, None]  # bit shift qweight
-
-        weights = weights & maxq
-
-
-        weights = weights - zeros
-        weights = scales * weights
+        weights = (qweights >> qweight_shifts[:, None]) & maxq  # bit shift qweight
+        # weights = weights & maxq
+        # weights = weights - zeros
+        weights = scales * weights - zeros
         weights = weights.to(tl.float16)
-        tl.static_print(weights.dtype)
-        tl.dot(weights, tl.trans(weights))
 
         tl.store(out_ptr + (
             (offs_k[:, None] + k * BLOCK_SIZE_K) * stride_ok + 
@@ -140,7 +132,10 @@ def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
         qweight.stride(0), qweight.stride(2), qweight.stride(1),
         scales.stride(0),
         out.stride(0), out.stride(1),
-        bits
+        qzeros.stride(0),
+        bits,
+        num_warps=8,
+        num_stages=1
     )
     return out
     
@@ -158,6 +153,7 @@ def fused_moe_kernel(
     stride_qe, stride_qk, stride_qn, # strides for qweight
     stride_om, stride_on,
     stride_se,
+    stride_ze,
     # Meta-parameters
     num_bits: int,
     maxq: tl.constexpr,
@@ -203,6 +199,7 @@ def fused_moe_kernel(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
+    
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
@@ -220,7 +217,7 @@ def fused_moe_kernel(
     
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
-    token_mask = offs_token < num_valid_tokens
+    token_mask = offs_token < num_valid_tokens # (BLOCK_SIZE_M, )
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
@@ -231,6 +228,8 @@ def fused_moe_kernel(
     qweight_shifts = (offs_k % numel_per_i32) * num_bits
     qzero_shifts = (offs_bn % numel_per_i32) * num_bits
 
+    # x_ptrs = x_ptr + (offs_token[:, None] // top_k * stride_xm +
+                    #   offs_k[None, :] * stride_xk)
     x_ptrs = x_ptr + (offs_token[:, None] // top_k * stride_xm +
                       offs_k[None, :] * stride_xk)
 
@@ -238,22 +237,26 @@ def fused_moe_kernel(
     qweight_ptrs = qweight_ptr + off_experts * stride_qe + (q_offs_k[:, None] * stride_qk +
                                                 offs_bn[None, :] * stride_qn)
 
+
     # qscales and qzeros only have a dependence on the n dimension, so we only have to 
     # do a single I/O
-    scales = tl.load(qscales_ptr + off_experts * stride_se + offs_bn, None)#.to(tl.float16)
+    scales = tl.load(
+        qscales_ptr + off_experts * stride_se + offs_bn, 
+        mask=offs_bn < N,
+        # None
+    )#.to(tl.float16)
+
     qzeros = tl.load(
         # qzeros_ptr + ((qzero_ncols * groups) + (offs_bn // numel_per_i32)),
         # assuming there's one group?
-        qzeros_ptr + (offs_bn // numel_per_i32),
-        None,
+        qzeros_ptr + stride_ze * off_experts + (offs_bn // numel_per_i32),
+        mask=offs_bn < N,
         eviction_policy="evict_last",
     )
-    zeros = qzeros >> qzero_shifts
-    zeros = zeros & maxq
-
-    # Dequantize
-    zeros = zeros + 1
-
+    zeros = (qzeros >> qzero_shifts) & maxq
+    # zeros = zeros & maxq
+    zeros = (zeros + 1) * scales
+    # zeros, scales = 0, 1
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -263,6 +266,7 @@ def fused_moe_kernel(
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # tl.device_print("k: ", k)
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
         x = tl.load(x_ptrs,
@@ -271,27 +275,22 @@ def fused_moe_kernel(
                     other=0.0)
         qweights = tl.load(
             qweight_ptrs, 
-            mask=offs_k[:, None] + k * BLOCK_SIZE_K // 4 < K // 4,
+            mask=offs_k[:, None] + k * BLOCK_SIZE_K < K,
             other=0.0
         )
-        weights = qweights >> qweight_shifts[:, None]  # bit shift qweight
-        weights = weights & maxq
 
-        weights = weights - zeros
-        weights = scales * weights
+        # Dequantize
+        weights = (qweights >> qweight_shifts[:, None]) & maxq  # bit shift qweight
+        weights = scales * weights - zeros
+        # weights = weights & maxq
+
+        # weights = weights - zeros
+        # weights = scales * weights
+
         weights = weights.to(tl.float16)
         x = x.to(tl.float16)
-        # tl.static_print(scales.dtype)
-        # tl.device_print("x dtype: ", x.dtype)
-
-
-        # b = tl.load(b_ptrs,
-                    # mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
-                    # other=0.0)
-        # We accumulate along the K dimension.
         accumulator += tl.dot(x, weights)
-        # tl.device_print("accumulator dtype: ", accumulator.dtype)
-        # Advance the ptrs to the next K block.
+
         x_ptrs += BLOCK_SIZE_K * stride_xk
         qweight_ptrs += BLOCK_SIZE_K // numel_per_i32 * stride_qk
 
@@ -306,10 +305,13 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_on = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # offs_on = tl.arange(0, BLOCK_SIZE_N)
     out_ptrs = out_ptr + stride_om * offs_token[:, None] + stride_on * offs_on[
         None, :]
     c_mask = token_mask[:, None] & (offs_on[None, :] < N)
+    # tl.device_print("about to store")
     tl.store(out_ptrs, accumulator, mask=c_mask)
+    # tl.device_print("successfully stored")
 
 
 def invoke_fused_moe_kernel(
@@ -325,6 +327,12 @@ def invoke_fused_moe_kernel(
     num_tokens_post_padded: torch.Tensor,
     mul_routed_weight: bool, top_k: int, num_bits: int,
     config: Dict[str, Any]) -> None:
+    print(f"x: {x.shape}, {x.stride()}")
+    print(f"qweights: {qweights.shape}, {qweights.stride()}")
+    print(f"qscales: {qscales.shape}, {qscales.stride()}")
+    print(f"qzeros: {qzeros.shape}, {qzeros.stride()}")
+    print(f"g_idx: {g_idx.shape}, {g_idx.stride()}")
+    print(f"out: {out.shape}, {out.stride()}")
 
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
@@ -332,8 +340,11 @@ def invoke_fused_moe_kernel(
     infeatures, outfeatures = g_idx.shape[1], qscales.shape[2]
     print(f"{infeatures=}, {outfeatures=}")
 
-    grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
-        'BLOCK_SIZE_M']) * triton.cdiv(outfeatures, META['BLOCK_SIZE_N']), )
+    total_blocks_m = triton.cdiv(sorted_token_ids.shape[0], config['BLOCK_SIZE_M'])
+    total_blocks_n = triton.cdiv(outfeatures, config['BLOCK_SIZE_N'])
+    grid = (total_blocks_m * total_blocks_n, 1)
+    # grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
+        # 'BLOCK_SIZE_M']) * triton.cdiv(outfeatures, META['BLOCK_SIZE_N']), )
     maxq = 2**num_bits - 1
 
     # Both of these are the *unpacked* dimensions that are necessary for pointer
@@ -345,14 +356,17 @@ def invoke_fused_moe_kernel(
         topk_ids.numel(),
         x.stride(0), x.stride(1),
         qweights.stride(0), qweights.stride(2), qweights.stride(1),
-        out.stride(0), out.stride(1),
+        out.stride(1), out.stride(2),
         qscales.stride(0),
+        qzeros.stride(0),
         num_bits=num_bits,
         maxq=maxq,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16,
         **config,
+        num_stages=1,
+        # num_warps=8
     )
 
 def fused_moe(
@@ -404,30 +418,10 @@ def fused_moe(
 
     topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
 
-    # if override_config:
-    #     config = override_config
-    # else:
-    #     # First try to load optimal config from the file
-    #     configs = get_moe_configs(E, w2.shape[2])
-
-    #     if configs:
-    #         # If an optimal configuration map has been found, look up the
-    #         # optimal config
-    #         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-    #     else:
-    #         # Else use the default config
-    #         config = {
-    #             'BLOCK_SIZE_M': 64,
-    #             'BLOCK_SIZE_N': 64,
-    #             'BLOCK_SIZE_K': 32,
-    #             'GROUP_SIZE_M': 8
-    #         }
-
-    #         if M <= E:
     config = {
         'BLOCK_SIZE_M': 16,
-        'BLOCK_SIZE_N': 16,
-        'BLOCK_SIZE_K': 16,
+        'BLOCK_SIZE_N': 32,
+        'BLOCK_SIZE_K': 64,
         'GROUP_SIZE_M': 1
     }
 
@@ -437,6 +431,12 @@ def fused_moe(
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
+    print(f"{expert_ids=}")
+    print(f"{sorted_token_ids=}")
+    print(f"{num_tokens_post_padded=}")
+
+    print(f"{sorted_token_ids.shape=}, {sorted_token_ids.stride()}")
+    assert num_tokens_post_padded % config['BLOCK_SIZE_M'] == 0
 
     invoke_fused_moe_kernel(hidden_states, qweights, qscales, qzeros, g_idx, intermediate_cache1,
                             topk_weights, topk_ids, sorted_token_ids,

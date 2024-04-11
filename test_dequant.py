@@ -15,7 +15,7 @@ def load_inputs():
 
 def test_custom_dequant():
     qweight, scales, zeros, g_idx = load_inputs()
-    autogptq = dequant_ref(qweight[0], scales[0], zeros[0], torch.zeros_like(g_idx[0]), 8)
+    autogptq = dequant_ref(qweight[1], scales[1], zeros[1], torch.zeros_like(g_idx[1]), 8)
     custom = dequant_custom(qweight, scales, zeros, torch.zeros_like(g_idx), 8)
     diff = autogptq - custom
     assert torch.count_nonzero(diff) == 0
@@ -23,24 +23,38 @@ def test_custom_dequant():
 def test_fused_moe():
     torch.manual_seed(1)
     num_bits = 8
-    seq_len = 128
-    num_experts = 16
-    topk = 4
+    seq_len = 4
+    num_experts = 2
+    topk = 1
 
 
     qweight, scales, zeros, g_idx = load_inputs()
+    qweight, scales, zeros, g_idx = qweight[:num_experts], scales[:num_experts], zeros[:num_experts], g_idx[:num_experts]
+
+    # scales.fill_(1.0)
+    # zeros.fill_(1)
+    # zeros = torch.zeros_like(zeros)
+
     dtype = scales.dtype
     x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight.device)
     gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight.device)
 
-    # dequant_w1 = ops.dequant_gptq(
-    #     qweight, zeros, scales, torch.zeros_like(g_idx), num_bits, False
-    # ).permute(0, 2, 1)
-    # ref_output = fused_moe_ref(x, dequant_w1, gating_output, topk, True)
+    dequant_w1 = ops.dequant_gptq(
+        qweight, zeros, scales, torch.zeros_like(g_idx), num_bits, False
+    ).permute(0, 2, 1)
+    print(f"{dequant_w1}")
+    ref_output = fused_moe_ref(x, dequant_w1, gating_output, topk, True)
     # print(ref_output)
 
-    fused_output = fused_moe_custom(x, qweight, scales, zeros, g_idx, gating_output, topk, True)
-    print(fused_output)
+    # scales.fill_(1.0)
+    # zeros.fill_(1)
+    fused_output = fused_moe_custom(x, qweight, scales, zeros, torch.zeros_like(g_idx), gating_output, topk, True, num_bits)
+    
+    # print(fused_output)
+    diff = ref_output - fused_output
+    print(f"{ref_output=}")
+    print(f"{fused_output=}")
+    print(f"{100 * torch.count_nonzero(diff) / diff.numel()}% difference between ref and custom")
     
 
 def test_dequant():
