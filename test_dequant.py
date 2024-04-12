@@ -8,11 +8,19 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_mo
 from vllm.model_executor.layers.fused_moe.quant_fused_moe import fused_moe as fused_moe_vllm_quant
 import numpy as np
 
-def load_inputs():
-    qweight = torch.load("./quantized_weights/0_qweight.pt")
-    scales = torch.load("./quantized_weights/0_scales.pt")
-    zeros = torch.load("./quantized_weights/0_qzeros.pt")
+def load_inputs(old=True):
+    if old:
+        qweight = torch.load("./quantized_weights/0_qweight.pt")
+        scales = torch.load("./quantized_weights/0_scales.pt")
+        zeros = torch.load("./quantized_weights/0_qzeros.pt")
+        # g_idx = torch.load("./quantized_weights/0_g_idx.pt")
+    else:
+        qweight = torch.load("./quant_weights_new/w1_qweight.pt")
+        scales = torch.load("./quant_weights_new/w1_scales.pt")
+        zeros = torch.load("./quant_weights_new/w1_qzeros.pt")
+        # g_idx = torch.load("./quant_weights_new/w1_g_idx.pt")
     g_idx = torch.load("./quantized_weights/0_g_idx.pt")
+    print(f"{qweight.shape=} {scales.shape=} {zeros.shape=} {g_idx.shape=}")
     return qweight, scales, zeros, g_idx
 
 
@@ -53,7 +61,7 @@ def test_fused_moe():
     num_experts = 16
     topk = 4
 
-    qweight, scales, zeros, g_idx = load_inputs()
+    qweight, scales, zeros, g_idx = load_inputs(old=False)
     dtype = scales.dtype
 
     x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight.device)
@@ -61,7 +69,7 @@ def test_fused_moe():
 
     for _ in range(10):
         tick = time.time()
-        fused_output = fused_moe_custom(x, qweight, scales, zeros, g_idx, gating_output, topk, True, num_bits)
+        fused_output = fused_moe_custom(x, qweight, scales, zeros, torch.zeros_like(g_idx), gating_output, topk, True, num_bits)
         tock = time.time()
         custom_time = tock - tick
 
@@ -79,7 +87,7 @@ def test_fused_moe():
 
     diff = ref_output - fused_output
 
-    assert torch.count_nonzero(diff) == 0
+    assert torch.count_nonzero(diff) == 0, f"Found {100*torch.count_nonzero(diff)/diff.numel()}% differences between ref and custom fused_moe"
     
 
 def test_dequant():
