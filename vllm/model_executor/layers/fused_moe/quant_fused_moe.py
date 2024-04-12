@@ -340,10 +340,10 @@ def fused_moe(
 
     config = {
         'BLOCK_SIZE_M': 64,
-        'BLOCK_SIZE_N': 32,
-        'BLOCK_SIZE_K': 128,
+        'BLOCK_SIZE_N': 64,
+        'BLOCK_SIZE_K': 32,
         'GROUP_SIZE_M': 8,
-        "num_warps": 8,
+        "num_warps": 4,
         "num_stages": 4
     }
 
