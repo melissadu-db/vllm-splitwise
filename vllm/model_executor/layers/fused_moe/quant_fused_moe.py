@@ -4,6 +4,44 @@ from typing import Optional, Dict, Any
 import triton
 import triton.language as tl
 from vllm._C import ops
+import os
+import functools
+from vllm.logger import init_logger
+import json
+
+logger = init_logger(__name__)
+
+def get_config_file_name(E: int, N: int) -> str:
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
+    return f"E={E},N={N},device_name={device_name}.json"
+
+@functools.lru_cache
+def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
+    """
+    Return optimized configurations for the fused MoE kernel.
+
+    The return value will be a dictionary that maps an irregular grid of
+    batch sizes to configurations of the fused_moe kernel. To evaluate the
+    kernel on a given batch size bs, the closest batch size in the grid should
+    be picked and the associated configuration chosen to invoke the kernel.
+    """
+
+    # First look up if an optimized configuration is available in the configs
+    # directory
+    json_file_name = get_config_file_name(E, N)
+
+    config_file_path = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
+    if os.path.exists(config_file_path):
+        with open(config_file_path) as f:
+            logger.info(
+                f"Using configuration from {config_file_path} for MoE layer.")
+            # If a configuration has been found, return it
+            return {int(key): val for key, val in json.load(f).items()}
+
+    # If no optimized configuration is available, we will use the default
+    # configuration
+    return None
 
 @triton.jit()
 def fused_moe_kernel(
@@ -78,14 +116,15 @@ def fused_moe_kernel(
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
-    
-    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+
+    offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % EM
+    offs_token_id = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
+
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
     token_mask = offs_token < num_valid_tokens # (BLOCK_SIZE_M, )
 
-        # offs_am = tl.max_contiguous(tl.multiple_of(offs_m, block_size_m), block_size_m)
-    # offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, block_size_n), block_size_n)
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     # Adjust offsets for packed tensors: qweight, qzero
@@ -215,8 +254,8 @@ def invoke_fused_moe_kernel(
         top_k=top_k,
         compute_type=tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16,
         **config,
-        # num_stages=1,
-        num_warps=8
+        # num_stages=4,
+        # num_warps=8
     )
 
 def fused_moe(
@@ -228,6 +267,7 @@ def fused_moe(
     renormalize: bool,
     num_bits: int = 8,
     inplace: bool = True,
+    override_config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -269,12 +309,42 @@ def fused_moe(
     E, N, _ = qweights_1.shape
 
     topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
+    # if override_config:
+    #     config = override_config
+    # else:
+    #     # First try to load optimal config from the file
+    #     configs = get_moe_configs(E, qweights_2.shape[2] * 4)
+
+    #     if configs:
+    #         # If an optimal configuration map has been found, look up the
+    #         # optimal config
+    #         # print("using...")
+    #         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    #     else:
+    #         # print("L...")
+    #         # Else use the default config
+    #         config = {
+    #             'BLOCK_SIZE_M': 64,
+    #             'BLOCK_SIZE_N': 64,
+    #             'BLOCK_SIZE_K': 32,
+    #             'GROUP_SIZE_M': 8
+    #         }
+
+    #         if M <= E:
+    #             config = {
+    #                 'BLOCK_SIZE_M': 16,
+    #                 'BLOCK_SIZE_N': 32,
+    #                 'BLOCK_SIZE_K': 64,
+    #                 'GROUP_SIZE_M': 1
+    #             }
 
     config = {
         'BLOCK_SIZE_M': 64,
         'BLOCK_SIZE_N': 32,
-        'BLOCK_SIZE_K': 256,
-        'GROUP_SIZE_M': 1
+        'BLOCK_SIZE_K': 128,
+        'GROUP_SIZE_M': 8,
+        "num_warps": 8,
+        "num_stages": 4
     }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
