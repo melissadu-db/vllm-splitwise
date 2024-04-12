@@ -29,7 +29,6 @@ def test_custom_dequant():
     assert torch.count_nonzero(diff) == 0
 
 def test_full_fused_moe():
-
     torch.manual_seed(1)
     weights1, weights2 = load_inputs()
     qweight1, scales1, zeros1, g_idx1 = weights1

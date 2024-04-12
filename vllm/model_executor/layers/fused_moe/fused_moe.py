@@ -371,39 +371,32 @@ def fused_moe(
 
     topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
 
-    # if override_config:
-    #     config = override_config
-    # else:
-    #     # First try to load optimal config from the file
-    #     configs = get_moe_configs(E, w2.shape[2])
+    if override_config:
+        config = override_config
+    else:
+        # First try to load optimal config from the file
+        configs = get_moe_configs(E, w2.shape[2])
 
-    #     if configs:
-    #         # If an optimal configuration map has been found, look up the
-    #         # optimal config
-    #         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-    #     else:
-    #         # Else use the default config
-    #         config = {
-    #             'BLOCK_SIZE_M': 64,
-    #             'BLOCK_SIZE_N': 64,
-    #             'BLOCK_SIZE_K': 32,
-    #             'GROUP_SIZE_M': 8
-    #         }
+        if configs:
+            # If an optimal configuration map has been found, look up the
+            # optimal config
+            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+        else:
+            # Else use the default config
+            config = {
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_K': 32,
+                'GROUP_SIZE_M': 8
+            }
 
-    #         if M <= E:
-    #             config = {
-    #                 'BLOCK_SIZE_M': 16,
-    #                 'BLOCK_SIZE_N': 32,
-    #                 'BLOCK_SIZE_K': 64,
-    #                 'GROUP_SIZE_M': 1
-    #             }
-
-    config = {
-        'BLOCK_SIZE_M': 16,
-        'BLOCK_SIZE_N': 32,
-        'BLOCK_SIZE_K': 64,
-        'GROUP_SIZE_M': 1
-    }
+            if M <= E:
+                config = {
+                    'BLOCK_SIZE_M': 16,
+                    'BLOCK_SIZE_N': 32,
+                    'BLOCK_SIZE_K': 64,
+                    'GROUP_SIZE_M': 1
+                }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
@@ -427,9 +420,8 @@ def fused_moe(
 
     invoke_fused_moe_kernel(intermediate_cache2, w2, intermediate_cache3,
                             topk_weights, topk_ids, sorted_token_ids,
-                            expert_ids, num_tokens_post_padded, False, 1,
+                            expert_ids, num_tokens_post_padded, True, 1,
                             config)
-    # return intermediate_cache3
 
     if inplace:
         return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
