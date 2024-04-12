@@ -1,4 +1,3 @@
-import time
 import torch
 from vllm._C import ops
 from dequant_baseline import dequant248 as dequant_ref
@@ -8,20 +7,18 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_mo
 from vllm.model_executor.layers.fused_moe.quant_fused_moe import fused_moe as fused_moe_vllm_quant
 import numpy as np
 
-def load_inputs(old=True):
-    if old:
-        qweight = torch.load("./quantized_weights/0_qweight.pt")
-        scales = torch.load("./quantized_weights/0_scales.pt")
-        zeros = torch.load("./quantized_weights/0_qzeros.pt")
-        # g_idx = torch.load("./quantized_weights/0_g_idx.pt")
-    else:
-        qweight = torch.load("./quant_weights_new/w1_qweight.pt")
-        scales = torch.load("./quant_weights_new/w1_scales.pt")
-        zeros = torch.load("./quant_weights_new/w1_qzeros.pt")
-        # g_idx = torch.load("./quant_weights_new/w1_g_idx.pt")
-    g_idx = torch.load("./quantized_weights/0_g_idx.pt")
-    print(f"{qweight.shape=} {scales.shape=} {zeros.shape=} {g_idx.shape=}")
-    return qweight, scales, zeros, g_idx
+def load_inputs():
+    # w1 is the up projection, with w1 and v1 concatenated
+    qweight1 = torch.load("./quant_weights_new/w1_qweight.pt")
+    scales1 = torch.load("./quant_weights_new/w1_scales.pt")
+    zeros1 = torch.load("./quant_weights_new/w1_qzeros.pt")
+    g_idx1 = torch.load("./quant_weights_new/w1_g_idx.pt")
+    # w2 is the down projection down to d_model
+    qweight2 = torch.load("./quant_weights_new/w2_qweight.pt")
+    scales2 = torch.load("./quant_weights_new/w2_scales.pt")
+    zeros2 = torch.load("./quant_weights_new/w2_qzeros.pt")
+    g_idx2 = torch.load("./quant_weights_new/w2_g_idx.pt")
+    return (qweight1, scales1, zeros1, g_idx1), (qweight2, scales2, zeros2, g_idx2)
 
 
 def test_custom_dequant():
@@ -32,8 +29,11 @@ def test_custom_dequant():
     assert torch.count_nonzero(diff) == 0
 
 def test_full_fused_moe():
-    qweight1, scales1, zeros1, g_idx1 = load_inputs()
-    qweight2, scales2, zeros2, g_idx2 = load_inputs()
+
+    torch.manual_seed(1)
+    weights1, weights2 = load_inputs()
+    qweight1, scales1, zeros1, g_idx1 = weights1
+    qweight2, scales2, zeros2, g_idx2 = weights2
     num_bits = 8
     seq_len = 128
     num_experts = 16
@@ -47,11 +47,21 @@ def test_full_fused_moe():
         qweight1, zeros1, scales1, torch.zeros_like(g_idx1), num_bits, False
     ).permute(0, 2, 1)
     dequant_w2 = ops.dequant_gptq(
-        w2["qweight"], w2["qzeros"], w2["scales"], w2["g_idx"], num_bits, False
+        qweight2, zeros2, scales2, torch.zeros_like(g_idx2), num_bits, False
     ).permute(0, 2, 1)
     ref_output = fused_moe_vllm(x, dequant_w1, dequant_w2, gating_output, topk, True)
 
+    quant_output = fused_moe_vllm_quant(
+        x, 
+        qweight1, scales1, zeros1, torch.zeros_like(g_idx1), 
+        qweight2, scales2, zeros2, torch.zeros_like(g_idx2), 
+        gating_output, topk, True, num_bits=num_bits
+    )
 
+    diffs = torch.count_nonzero(ref_output - quant_output)
+
+    assert diffs == 0, f"Found {100 * diffs / ref_output.numel():.2f}% differences between ref and quant fused_moe"
+    print("full_fused_moe test passed!")
 
 
 def test_fused_moe():
@@ -61,33 +71,26 @@ def test_fused_moe():
     num_experts = 16
     topk = 4
 
-    qweight, scales, zeros, g_idx = load_inputs(old=False)
-    dtype = scales.dtype
-
-    x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight.device)
-    gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight.device)
-
-    for _ in range(10):
-        tick = time.time()
-        fused_output = fused_moe_custom(x, qweight, scales, zeros, torch.zeros_like(g_idx), gating_output, topk, True, num_bits)
-        tock = time.time()
-        custom_time = tock - tick
-
-    for _ in range(10):
-        tick = time.time()
-        dequant_w1 = ops.dequant_gptq(
-            qweight, zeros, scales, torch.zeros_like(g_idx), num_bits, False
-        ).permute(0, 2, 1)
-        ref_output = fused_moe_ref(x, dequant_w1, gating_output, topk, True)
-        tock = time.time()
-        ref_time = tock - tick
+    weights1, weights2 = load_inputs()
+    qweight1, scales1, zeros1, g_idx1 = weights1
+    # qweight2, scales2, zeros2, g_idx2 = weights2
     
-    print(f"Speedup: {ref_time / custom_time:.2f}x")
+    dtype = scales1.dtype
 
+    x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight1.device)
+    gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight1.device)
+
+    fused_output = fused_moe_custom(x, qweight1, scales1, zeros1, torch.zeros_like(g_idx1), gating_output, topk, True, num_bits)
+
+    dequant_w1 = ops.dequant_gptq(
+        qweight1, zeros1, scales1, torch.zeros_like(g_idx1), num_bits, False
+    ).permute(0, 2, 1)
+    ref_output = fused_moe_ref(x, dequant_w1, gating_output, topk, True)
+    print(ref_output)
 
     diff = ref_output - fused_output
-
-    assert torch.count_nonzero(diff) == 0, f"Found {100*torch.count_nonzero(diff)/diff.numel()}% differences between ref and custom fused_moe"
+    num_diffs = torch.count_nonzero(diff)
+    assert num_diffs == 0, f"Found {num_diffs / diff.numel()}% differences w1 between ref and custom fused_moe"
     
 
 def test_dequant():
@@ -105,17 +108,5 @@ def test_dequant():
 
 # test_dequant()
 # test_custom_dequant()
-test_fused_moe()
-
-    # model params
-    # num_experts = 16
-    # in_dim = 6144
-    # out_dim = 6144 * 1.75
-    # tp_size = 4
-    # quant_bits = 8
-    # packing_factor = 32 // quant_bits
-
-    # qweight = torch.randint(0, (1<<31) - 1, (num_experts, in_dim // tp_size, 2 * out_dim // packing_factor), dtype=torch.int32)
-    # scales = torch.rand((num_experts, 1, 2 * out_dim // packing_factor), dtype=torch.float16)
-    # zeros = torch.randint(0, (1<<31) - 1, (num_experts, 1, in_dim // tp_size), dtype=torch.int32)
-    # g_idx = torch.arange(0, in_dim).repeat(num_experts, 1)
+# test_fused_moe()
+test_full_fused_moe()

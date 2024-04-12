@@ -421,35 +421,3 @@ def fused_moe(
                             topk_ids.shape[1], num_bits, config)
 
     return intermediate_cache1
-
-# top_k = 4
-# E = 16
-
-# torch.manual_seed(1)
-
-# qweight = state['0_qweight.pt']
-# qzeros = state['0_qzeros.pt']
-# scales = state["0_scales.pt"]
-# g_idx = state['0_g_idx.pt']
-# dtype = scales.dtype
-# print(f'Running with {dtype=}')
-# T = 2
-# E = 16
-
-# x = torch.rand((T, 6144), dtype=dtype).to(qweight.device)
-# gating_output = torch.rand((T, E), dtype=dtype).to(x.device)
-# dequantized = dequantize(qweight, scales)
-# torch.set_printoptions(profile="full")
-
-
-# fused_moe(
-#     x,
-#     qweight,
-#     qzeros,
-#     scales,
-#     g_idx,
-#     gating_output,
-#     topk=top_k,
-#     renormalize=True,
-#     inplace=True,
-# )
