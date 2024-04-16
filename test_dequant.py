@@ -1,8 +1,8 @@
 import torch
 from vllm._C import ops
-from dequant_baseline import dequant248 as dequant_ref
-from dequant_sandbox import dequant248 as dequant_custom, fused_moe as fused_moe_custom
-from fused_moe_baseline import fused_moe as fused_moe_ref
+# from dequant_baseline import dequant248 as dequant_ref
+# from dequant_sandbox import dequant248 as dequant_custom, fused_moe as fused_moe_custom
+# from fused_moe_baseline import fused_moe as fused_moe_ref
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
 from vllm.model_executor.layers.fused_moe.quant_fused_moe import fused_moe as fused_moe_vllm_quant
 import numpy as np
