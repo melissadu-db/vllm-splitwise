@@ -112,7 +112,8 @@ def run_grid(bs, method):
 
     # holds Dict[str, Dict[str, int]]
     filename = get_config_file_name(num_total_experts,
-                                    model_intermediate_size // tp_size)
+                                    model_intermediate_size // tp_size,
+                                    quant=True)
     print(f"writing config to file {filename}")
     existing_content = {}
     if os.path.exists(filename):
@@ -170,7 +171,7 @@ def load_inputs(
     ).to("cuda:0")
     scales2 = torch.full((num_experts, 1, d_model), 0.0003, dtype=torch.float16).to("cuda:0")
     zeros2 = torch.full((num_experts, 1, d_model // tp_size), 2139062143, dtype=torch.int32).to("cuda:0")
-    g_idx2 = torch.zeros((num_experts, 2688)).to("cuda:0")
+    g_idx2 = torch.zeros((num_experts, intermediate_size // tp_size)).to("cuda:0")
     return (qweight1, scales1, zeros1, g_idx1), (qweight2, scales2, zeros2, g_idx2)
 
 

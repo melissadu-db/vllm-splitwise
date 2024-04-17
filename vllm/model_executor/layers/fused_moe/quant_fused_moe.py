@@ -1,5 +1,5 @@
 import torch
-from vllm.model_executor.layers.fused_moe import moe_align_block_size, fused_topk
+from vllm.model_executor.layers.fused_moe import moe_align_block_size, fused_topk, get_config_file_name
 from typing import Optional, Dict, Any
 import triton
 import triton.language as tl
@@ -11,9 +11,6 @@ import json
 
 logger = init_logger(__name__)
 
-def get_config_file_name(E: int, N: int) -> str:
-    device_name = torch.cuda.get_device_name().replace(" ", "_")
-    return f"E={E},N={N},device_name={device_name}.json"
 
 @functools.lru_cache
 def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
@@ -28,7 +25,7 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    json_file_name = get_config_file_name(E, N)
+    json_file_name = get_config_file_name(E, N, quant=True)
 
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
