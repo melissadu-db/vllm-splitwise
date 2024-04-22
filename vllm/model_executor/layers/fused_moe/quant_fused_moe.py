@@ -233,6 +233,11 @@ def invoke_fused_moe_kernel(
         'BLOCK_SIZE_M']) * triton.cdiv(outfeatures, META['BLOCK_SIZE_N']), )
     maxq = 2**num_bits - 1
 
+    num_stages, num_warps = config.get('num_stages', 4), config.get('num_warps', 8)
+    if 'num_stages' in config:
+        del config['num_stages']
+    if 'num_warps' in config:
+        del config['num_warps']
     # Both of these are the *unpacked* dimensions that are necessary for pointer
     # arithmetic to be computed properly
     fused_moe_kernel[grid](
@@ -251,8 +256,8 @@ def invoke_fused_moe_kernel(
         top_k=top_k,
         compute_type=tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16,
         **config,
-        # num_stages=4,
-        # num_warps=8
+        num_stages=num_stages,
+        num_warps=num_warps
     )
 
 def fused_moe(
@@ -303,46 +308,41 @@ def fused_moe(
     qweights_2 = qweights_2.permute(0, 2, 1) # (E, N, K // packing_factor // tp_size)
 
     M, _ = hidden_states.shape
+    print(f"{M=}")
     E, N, _ = qweights_1.shape
 
     topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
-    # if override_config:
-    #     config = override_config
-    # else:
-    #     # First try to load optimal config from the file
-    #     configs = get_moe_configs(E, qweights_2.shape[2] * 4)
+    if override_config:
+        config = override_config
+    else:
+        # First try to load optimal config from the file
+        # We need to multiply by 2 here, since 
+        configs = get_moe_configs(E, qweights_2.shape[2] * 2)
 
-    #     if configs:
-    #         # If an optimal configuration map has been found, look up the
-    #         # optimal config
-    #         # print("using...")
-    #         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-    #     else:
-    #         # print("L...")
-    #         # Else use the default config
-    #         config = {
-    #             'BLOCK_SIZE_M': 64,
-    #             'BLOCK_SIZE_N': 64,
-    #             'BLOCK_SIZE_K': 32,
-    #             'GROUP_SIZE_M': 8
-    #         }
+        if configs:
+            # If an optimal configuration map has been found, look up the
+            # optimal config
+            # print("using...")
+            config = configs[min(configs.keys(), key=lambda x: abs(int(x) - M))]
+            # config['num_stages'] = 2
+            # print(config)
+        else:
+            # Else use the default config
+            config = {
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_K': 32,
+                'GROUP_SIZE_M': 8
+            }
 
-    #         if M <= E:
-    #             config = {
-    #                 'BLOCK_SIZE_M': 16,
-    #                 'BLOCK_SIZE_N': 32,
-    #                 'BLOCK_SIZE_K': 64,
-    #                 'GROUP_SIZE_M': 1
-    #             }
+            if M <= E:
+                config = {
+                    'BLOCK_SIZE_M': 16,
+                    'BLOCK_SIZE_N': 32,
+                    'BLOCK_SIZE_K': 64,
+                    'GROUP_SIZE_M': 1
+                }
 
-    config = {
-        'BLOCK_SIZE_M': 64,
-        'BLOCK_SIZE_N': 64,
-        'BLOCK_SIZE_K': 32,
-        'GROUP_SIZE_M': 8,
-        "num_warps": 4,
-        "num_stages": 4
-    }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,

@@ -26,10 +26,10 @@ def run_grid(bs, method):
     tp_size = 4
     model_intermediate_size = 10752
     num_layers = 40
-    num_calls = 100
+    num_calls = 5
 
     num_warmup_trials = 1
-    num_trials = 1
+    num_trials = 2
 
     configs = []
     if bs <= 16:
@@ -45,7 +45,7 @@ def run_grid(bs, method):
 
     for block_size_n in [32, 64, 128, 256]:
         for block_size_m in BLOCK_SIZES_M:
-            for block_size_k in [64, 128, 256]:
+            for block_size_k in [32, 64, 128, 256]:
                 for group_size_m in [1, 16, 32, 64]:
                     for num_warps in [4, 8]:
                         configs.append({

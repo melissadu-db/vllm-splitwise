@@ -6,6 +6,7 @@ from vllm._C import ops
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
 from vllm.model_executor.layers.fused_moe.quant_fused_moe import fused_moe as fused_moe_vllm_quant
 import numpy as np
+import torch.nn.functional as F
 
 def create_qweight(E, K, N):
     # Generate a tensor of shape (E, K, N, 4) with random uint8 values
@@ -80,7 +81,13 @@ def test_full_fused_moe():
 
     dtype = scales1.dtype
     x = torch.rand((seq_len, 6144), dtype=dtype).to(qweight1.device)
-    gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight1.device)
+    # gating_output = torch.rand((seq_len, num_experts), dtype=dtype).to(qweight1.device)
+    gating_output = F.softmax(torch.rand(
+        (seq_len, num_experts),
+        device=x.device,
+        dtype=torch.float32,
+    ),
+    dim=-1)
 
     dequant_w1 = ops.dequant_gptq(
         qweight1, zeros1, scales1, torch.zeros_like(g_idx1), num_bits, False
