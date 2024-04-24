@@ -1,29 +1,47 @@
+import argparse
 import json
 import os
-import sys
+from typing import Optional, Callable
 
 from vllm.model_executor.layers.fused_moe import quant_fused_moe, get_config_file_name
 import torch
 import torch.nn.functional as F
 import triton
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-
-def main():
+def main(
+    gpu_idx: int, 
+    gpu_ids: list[int],
+    batch_sizes: Optional[list[int]] = 
+    None, tp_size: Optional[int] = 8
+):
+    # Set the GPU device for this process
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[gpu_idx])
     method = quant_fused_moe
-    for bs in [
-        1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
-        2048, 3072, 4096
-    ]:
-        run_grid(bs, method=method)
+
+    if batch_sizes is None:
+        batch_sizes = [
+            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 
+            256, 512, 1024, 1536, 2048, 3072, 4096
+        ]
+
+    # Distribute work based on the GPU ID
+    local_batch_sizes = [
+        bs for idx, bs in enumerate(batch_sizes) 
+        if idx % len(gpu_ids) == gpu_idx
+    ]
+    print(f"GPU {gpu_idx}: Running work with batch sizes {local_batch_sizes}")
+
+    for bs in local_batch_sizes:
+        run_grid(bs, gpu_idx, method=method, tp_size=tp_size)
+
+    print(f"GPU {gpu_idx}: Completed work with batch sizes {local_batch_sizes}")
 
 
-def run_grid(bs, method):
+def run_grid(bs: int, gpu_idx: int, method: Callable, tp_size: Optional[int] = 8):
     d_model = 6144
     num_total_experts = 16
     top_k = 4
-    tp_size = 4
     model_intermediate_size = 10752
     num_layers = 40
     num_calls = 5
@@ -61,8 +79,6 @@ def run_grid(bs, method):
     best_time_us = 1e20
 
     for config in configs:
-        print(f'{tp_size=} {bs=}')
-        print(f'{config}')
         # warmup
         print('warming up')
         try:
@@ -110,10 +126,16 @@ def run_grid(bs, method):
     print("best_time_us", best_time_us)
     print("best_config", best_config)
 
-    # holds Dict[str, Dict[str, int]]
+    print(f"Best time for batch size {bs}: {best_time_us} μs with config {best_config}")
+
+    # Save the best config for this batch size
+    # filename = f"{get_config_file_name(num_total_experts, model_intermediate_size // tp_size, quant=True)}_{torch.cuda.current_device()}"
+    # with open(filename, "w") as f:
+        # json.dump({str(bs): best_config}, f, indent=4)
     filename = get_config_file_name(num_total_experts,
                                     model_intermediate_size // tp_size,
                                     quant=True)
+    filename += f"_{gpu_idx}"
     print(f"writing config to file {filename}")
     existing_content = {}
     if os.path.exists(filename):
@@ -226,5 +248,56 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
     return dur_ms
 
 
+# Set up argument parsing
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="Benchmark GPTQ across multiple GPUs",
+        epilog="Specify GPU ID and optionally provide batch sizes and tp_size."
+    )
+    
+    # Mandatory GPU ID
+    parser.add_argument(
+        "gpu_idx",
+        type=int,
+        help="The local idx of the GPU to use, starting from 0"
+    )
+
+    parser.add_argument(
+        "gpus",
+        type=str,
+        help="Comma-separated list of GPU IDs to use."
+    )
+
+    # Optional batch sizes as a comma-separated list
+    parser.add_argument(
+        "batch_sizes",
+        type=str,
+        nargs="?",
+        help="Comma-separated list of batch sizes to benchmark."
+    )
+
+    # Optional tp_size with a default value
+    parser.add_argument(
+        "tp_size",
+        type=int,
+        nargs="?",
+        default=8,
+        help="Tensor parallelism size (default: 8)."
+    )
+
+    return parser.parse_args()
+
+# Entry point with argument parsing
 if __name__ == "__main__":
-    sys.exit(main())
+    args = parse_arguments()
+
+    # Parse the batch sizes from the comma-separated string
+    if args.batch_sizes:
+        batch_sizes = [int(bs) for bs in args.batch_sizes.split(",") if bs]
+    else:
+        batch_sizes = []
+    
+    gpu_ids = [int(gpu_id) for gpu_id in args.gpus.split(",") if gpu_id]
+
+    # Call the main function with parsed arguments
+    main(args.gpu_idx, gpu_ids, batch_sizes, args.tp_size)

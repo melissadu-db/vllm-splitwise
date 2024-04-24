@@ -308,7 +308,6 @@ def fused_moe(
     qweights_2 = qweights_2.permute(0, 2, 1) # (E, N, K // packing_factor // tp_size)
 
     M, _ = hidden_states.shape
-    print(f"{M=}")
     E, N, _ = qweights_1.shape
 
     topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
