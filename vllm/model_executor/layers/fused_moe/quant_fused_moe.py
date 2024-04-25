@@ -143,15 +143,12 @@ def fused_moe_kernel(
     scales = tl.load(
         qscales_ptr + off_experts * stride_se + offs_bn, 
         mask=offs_bn < N,
-        # None
-    )#.to(tl.float16)
+    )
 
+    # TODO: this currently assumes that there is a single quantization group
     qzeros = tl.load(
-        # qzeros_ptr + ((qzero_ncols * groups) + (offs_bn // numel_per_i32)),
-        # assuming there's one group?
         qzeros_ptr + stride_ze * off_experts + (offs_bn // numel_per_i32),
         mask=offs_bn < N,
-        eviction_policy="evict_last",
     )
     zeros = (qzeros >> qzero_shifts) & maxq
     zeros = (zeros + 1) * scales
@@ -164,12 +161,13 @@ def fused_moe_kernel(
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # tl.device_print("k: ", k)
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
-        x = tl.load(x_ptrs,
-                    mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-                    other=0.0)
+        x = tl.load(
+            x_ptrs,
+            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+            other=0.0
+        )
         qweights = tl.load(
             qweight_ptrs, 
             mask=offs_k[:, None] + k * BLOCK_SIZE_K < K,
@@ -180,11 +178,6 @@ def fused_moe_kernel(
         weights = (qweights >> qweight_shifts[:, None]) & maxq  # bit shift qweight
         weights = scales * weights - zeros
 
-
-        weights = weights.to(tl.float16)
-        x = x.to(tl.float16)
-        # if off_experts == 0 and pid_m == 1:
-            # tl.device_print("x for expert 0: ", x)
         accumulator += tl.dot(x, weights)
 
         x_ptrs += BLOCK_SIZE_K * stride_xk
@@ -201,13 +194,10 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_on = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    # offs_on = tl.arange(0, BLOCK_SIZE_N)
     out_ptrs = out_ptr + stride_om * offs_token[:, None] + stride_on * offs_on[
         None, :]
     c_mask = token_mask[:, None] & (offs_on[None, :] < N)
-    # tl.device_print("about to store")
     tl.store(out_ptrs, accumulator, mask=c_mask)
-    # tl.device_print("successfully stored")
 
 
 def invoke_fused_moe_kernel(
@@ -222,7 +212,8 @@ def invoke_fused_moe_kernel(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     mul_routed_weight: bool, top_k: int, num_bits: int,
-    config: Dict[str, Any]) -> None:
+    config: Dict[str, Any],
+    debug: bool =False) -> None:
 
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
@@ -233,14 +224,7 @@ def invoke_fused_moe_kernel(
         'BLOCK_SIZE_M']) * triton.cdiv(outfeatures, META['BLOCK_SIZE_N']), )
     maxq = 2**num_bits - 1
 
-    num_stages, num_warps = config.get('num_stages', 4), config.get('num_warps', 8)
-    if 'num_stages' in config:
-        del config['num_stages']
-    if 'num_warps' in config:
-        del config['num_warps']
-    # Both of these are the *unpacked* dimensions that are necessary for pointer
-    # arithmetic to be computed properly
-    fused_moe_kernel[grid](
+    k = fused_moe_kernel[grid](
         x, qweights, qscales, qzeros, g_idx, out,
         topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
         outfeatures, infeatures, sorted_token_ids.shape[0],
@@ -256,9 +240,16 @@ def invoke_fused_moe_kernel(
         top_k=top_k,
         compute_type=tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16,
         **config,
-        num_stages=num_stages,
-        num_warps=num_warps
     )
+
+    if debug:
+        with open('dequant_simple.txt', 'w') as f:
+            print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
+            print("IR", k.asm['ttir'], file=f)
+            print("TTGIR", k.asm['ttgir'], file=f)
+            print("PTX", k.asm['ptx'], file=f)
+            print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
+
 
 def fused_moe(
     hidden_states: torch.Tensor,
@@ -323,7 +314,6 @@ def fused_moe(
             # optimal config
             # print("using...")
             config = configs[min(configs.keys(), key=lambda x: abs(int(x) - M))]
-            # config['num_stages'] = 2
             # print(config)
         else:
             # Else use the default config
@@ -341,7 +331,6 @@ def fused_moe(
                     'BLOCK_SIZE_K': 64,
                     'GROUP_SIZE_M': 1
                 }
-
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,

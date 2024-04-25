@@ -219,7 +219,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
 
-    fused_moe_kernel[grid](
+    k = fused_moe_kernel[grid](
         A,
         B,
         C,
@@ -243,6 +243,13 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
         **config,
     )
+
+    with open('fused_moe.txt', 'w') as f:
+        print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
+        print("IR", k.asm['ttir'], file=f)
+        print("TTGIR", k.asm['ttgir'], file=f)
+        print("PTX", k.asm['ptx'], file=f)
+        print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
 
 
 def get_config_file_name(E: int, N: int, quant: bool = False) -> str:
