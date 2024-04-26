@@ -7,7 +7,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.fused_moe import (moe_align_block_size, fused_topk, quant_fused_moe)
+from vllm.model_executor.layers.fused_moe import (moe_align_block_size, fused_topk, quant_fused_moe, fused_moe)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -219,9 +219,8 @@ class GPTQLinearMethod(LinearMethodBase):
             output = output + bias
         return output.reshape(out_shape)
 
-    def apply_moe_weights(self, w1: Dict[str,
-                                         torch.Tensor], w2: Dict[str,
-                                                                 torch.Tensor],
+    def apply_moe_weights(self, 
+                          w1: Dict[str, torch.Tensor], w2: Dict[str, torch.Tensor],
                           x: torch.Tensor, gating_output: torch.Tensor,
                           topk: int, renormalize: bool) -> torch.Tensor:
         # shuffle weights for exllama
@@ -235,7 +234,10 @@ class GPTQLinearMethod(LinearMethodBase):
                 w["exllama_state"] = ExllamaState.READY
                 ops.gptq_shuffle(w["qweight"], w["g_idx"],
                                  self.quant_config.weight_bits)
-        if x.shape[0] >= 128:
+
+        # For memory bound workloads: decode and small prefills, use the
+        # fused quant moe. Otherwise, dequantize them individually
+        if x.shape[0] <= 512:
             return quant_fused_moe(
                 x,
                 w1["qweight"], w1["scales"], w1["qzeros"], w1["g_idx"],
@@ -243,6 +245,18 @@ class GPTQLinearMethod(LinearMethodBase):
                 gating_output, topk, renormalize,
                 self.quant_config.weight_bits,
             )
+        
+        dequant_w1 = ops.dequant_gptq(
+            w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
+            self.quant_config.weight_bits,
+            w1["exllama_state"] == ExllamaState.READY).permute(0, 2, 1)
+        dequant_w2 = ops.dequant_gptq(
+            w2["qweight"], w2["qzeros"], w2["scales"], w2["g_idx"],
+            self.quant_config.weight_bits,
+            w2["exllama_state"] == ExllamaState.READY).permute(0, 2, 1)
+        return fused_moe(x, dequant_w1, dequant_w2, gating_output, topk,
+                            renormalize)
+        
 
         topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
         (sorted_token_ids, expert_ids,

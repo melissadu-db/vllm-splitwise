@@ -168,11 +168,7 @@ def fused_moe_kernel(
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0
         )
-        qweights = tl.load(
-            qweight_ptrs, 
-            mask=offs_k[:, None] + k * BLOCK_SIZE_K < K,
-            other=0.0
-        )
+        qweights = tl.load(qweight_ptrs)
 
         # Dequantize
         weights = (qweights >> qweight_shifts[:, None]) & maxq  # bit shift qweight
@@ -219,6 +215,9 @@ def invoke_fused_moe_kernel(
     assert sorted_token_ids.stride(0) == 1
 
     infeatures, outfeatures = g_idx.shape[1], qscales.shape[2]
+    # Since we avoid masking, infeatures (the reduced K dimension) will
+    # need to be a multiple of BLOCK_SIZE_K
+    assert infeatures % config['BLOCK_SIZE_K'] == 0
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(outfeatures, META['BLOCK_SIZE_N']), )
