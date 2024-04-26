@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 # YAPF formatter, adapted from ray and skypilot.
 #
 # Usage:
@@ -16,13 +16,11 @@
 # Cause the script to exit if a single command fails
 set -eo pipefail
 
-
 # this stops git rev-parse from failing if we run this from the .git directory
 builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
-PATH="/mnt/workdisk/linden/vllm-private/venv/bin:${PATH}"
 YAPF_VERSION=$(yapf --version | awk '{print $2}')
 RUFF_VERSION=$(ruff --version | awk '{print $2}')
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
