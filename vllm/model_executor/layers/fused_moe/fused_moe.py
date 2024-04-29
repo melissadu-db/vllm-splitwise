@@ -244,13 +244,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         **config,
     )
 
-    with open('fused_moe.txt', 'w') as f:
-        print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
-        print("IR", k.asm['ttir'], file=f)
-        print("TTGIR", k.asm['ttgir'], file=f)
-        print("PTX", k.asm['ptx'], file=f)
-        print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
-
 
 def get_config_file_name(E: int, N: int, quant: bool = False) -> str:
     device_name = torch.cuda.get_device_name().replace(" ", "_")
