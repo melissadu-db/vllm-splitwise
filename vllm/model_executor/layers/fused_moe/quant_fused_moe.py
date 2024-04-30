@@ -1,5 +1,7 @@
 import torch
-from vllm.model_executor.layers.fused_moe import moe_align_block_size, fused_topk, get_config_file_name
+from vllm.model_executor.layers.fused_moe import (moe_align_block_size,
+                                                  fused_topk,
+                                                  get_config_file_name)
 from typing import Optional, Dict, Any
 import triton
 import triton.language as tl
@@ -154,8 +156,8 @@ def fused_moe_kernel(
     qweight_ptrs = qweight_ptr + off_experts * stride_qe + (
         q_offs_k[:, None] * stride_qk + offs_bn[None, :] * stride_qn)
 
-    # qscales and qzeros only have a dependence on the n dimension, so we only have to
-    # do a single I/O
+    # qscales and qzeros only have a dependence on the n dimension,
+    # so we only have to do a single I/O
     scales = tl.load(
         qscales_ptr + off_experts * stride_se + offs_bn,
         mask=offs_bn < N,
@@ -240,7 +242,7 @@ def invoke_fused_moe_kernel(x: torch.Tensor,
         'BLOCK_SIZE_M']) * triton.cdiv(outfeatures, META['BLOCK_SIZE_N']), )
     maxq = 2**num_bits - 1
 
-    k = fused_moe_kernel[grid](
+    fused_moe_kernel[grid](
         x,
         qweights,
         qscales,
@@ -271,18 +273,6 @@ def invoke_fused_moe_kernel(x: torch.Tensor,
         compute_type=tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16,
         **config,
     )
-
-    if debug:
-        with open('dequant_simple.txt', 'w') as f:
-            print(
-                f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n",
-                file=f)
-            print("IR", k.asm['ttir'], file=f)
-            print("TTGIR", k.asm['ttgir'], file=f)
-            print("PTX", k.asm['ptx'], file=f)
-            print(
-                f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n",
-                file=f)
 
 
 def fused_moe(
