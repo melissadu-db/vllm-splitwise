@@ -40,18 +40,33 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
     # configuration
     return None
 
+
 @triton.jit()
 def fused_moe_kernel(
     # Pointers to matrices
-    x_ptr, qweight_ptr, qscales_ptr, qzeros_ptr, g_idx_ptr, out_ptr,
-    topk_weights_ptr, sorted_token_ids_ptr, expert_ids_ptr, num_tokens_post_padded_ptr,
+    x_ptr,
+    qweight_ptr,
+    qscales_ptr,
+    qzeros_ptr,
+    g_idx_ptr,
+    out_ptr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
     # Matrix dimensions
-    N, K, EM,
+    N,
+    K,
+    EM,
     num_valid_tokens,
     # Strides
-    stride_xm, stride_xk,
-    stride_qe, stride_qk, stride_qn, # strides for qweight
-    stride_om, stride_on,
+    stride_xm,
+    stride_xk,
+    stride_qe,
+    stride_qk,
+    stride_qn,  # strides for qweight
+    stride_om,
+    stride_on,
     stride_se,
     stride_ze,
     # Meta-parameters
@@ -115,13 +130,15 @@ def fused_moe_kernel(
         return
 
     offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % EM
-    offs_token_id = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    offs_token_id = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M),
+                                      BLOCK_SIZE_M)
 
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
-    token_mask = offs_token < num_valid_tokens # (BLOCK_SIZE_M, )
+    token_mask = offs_token < num_valid_tokens  # (BLOCK_SIZE_M, )
 
     offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N),
+                                BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     # Adjust offsets for packed tensors: qweight, qzero
@@ -134,14 +151,13 @@ def fused_moe_kernel(
                       offs_k[None, :] * stride_xk)
 
     off_experts = tl.load(expert_ids_ptr + pid_m)
-    qweight_ptrs = qweight_ptr + off_experts * stride_qe + (q_offs_k[:, None] * stride_qk +
-                                                offs_bn[None, :] * stride_qn)
+    qweight_ptrs = qweight_ptr + off_experts * stride_qe + (
+        q_offs_k[:, None] * stride_qk + offs_bn[None, :] * stride_qn)
 
-
-    # qscales and qzeros only have a dependence on the n dimension, so we only have to 
+    # qscales and qzeros only have a dependence on the n dimension, so we only have to
     # do a single I/O
     scales = tl.load(
-        qscales_ptr + off_experts * stride_se + offs_bn, 
+        qscales_ptr + off_experts * stride_se + offs_bn,
         mask=offs_bn < N,
     )
 
@@ -163,22 +179,21 @@ def fused_moe_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
-        x = tl.load(
-            x_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-            other=0.0
-        )
+        x = tl.load(x_ptrs,
+                    mask=token_mask[:, None] &
+                    (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    other=0.0)
         qweights = tl.load(qweight_ptrs)
 
         # Dequantize
-        weights = (qweights >> qweight_shifts[:, None]) & maxq  # bit shift qweight
+        weights = (
+            qweights >> qweight_shifts[:, None]) & maxq  # bit shift qweight
         weights = scales * weights - zeros
 
         accumulator += tl.dot(x, weights)
 
         x_ptrs += BLOCK_SIZE_K * stride_xk
         qweight_ptrs += BLOCK_SIZE_K // numel_per_i32 * stride_qk
-
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token,
@@ -196,20 +211,22 @@ def fused_moe_kernel(
     tl.store(out_ptrs, accumulator, mask=c_mask)
 
 
-def invoke_fused_moe_kernel(
-    x: torch.Tensor, 
-    qweights: torch.Tensor, 
-    qscales: torch.Tensor,
-    qzeros: torch.Tensor,
-    g_idx: torch.Tensor,
-    out: torch.Tensor,
-    topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    mul_routed_weight: bool, top_k: int, num_bits: int,
-    config: Dict[str, Any],
-    debug: bool =False) -> None:
+def invoke_fused_moe_kernel(x: torch.Tensor,
+                            qweights: torch.Tensor,
+                            qscales: torch.Tensor,
+                            qzeros: torch.Tensor,
+                            g_idx: torch.Tensor,
+                            out: torch.Tensor,
+                            topk_weights: torch.Tensor,
+                            topk_ids: torch.Tensor,
+                            sorted_token_ids: torch.Tensor,
+                            expert_ids: torch.Tensor,
+                            num_tokens_post_padded: torch.Tensor,
+                            mul_routed_weight: bool,
+                            top_k: int,
+                            num_bits: int,
+                            config: Dict[str, Any],
+                            debug: bool = False) -> None:
 
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
@@ -224,13 +241,27 @@ def invoke_fused_moe_kernel(
     maxq = 2**num_bits - 1
 
     k = fused_moe_kernel[grid](
-        x, qweights, qscales, qzeros, g_idx, out,
-        topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
-        outfeatures, infeatures, sorted_token_ids.shape[0],
+        x,
+        qweights,
+        qscales,
+        qzeros,
+        g_idx,
+        out,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        outfeatures,
+        infeatures,
+        sorted_token_ids.shape[0],
         topk_ids.numel(),
-        x.stride(0), x.stride(1),
-        qweights.stride(0), qweights.stride(2), qweights.stride(1),
-        out.stride(1), out.stride(2),
+        x.stride(0),
+        x.stride(1),
+        qweights.stride(0),
+        qweights.stride(2),
+        qweights.stride(1),
+        out.stride(1),
+        out.stride(2),
         qscales.stride(0),
         qzeros.stride(0),
         num_bits=num_bits,
@@ -243,17 +274,27 @@ def invoke_fused_moe_kernel(
 
     if debug:
         with open('dequant_simple.txt', 'w') as f:
-            print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
+            print(
+                f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n",
+                file=f)
             print("IR", k.asm['ttir'], file=f)
             print("TTGIR", k.asm['ttgir'], file=f)
             print("PTX", k.asm['ptx'], file=f)
-            print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
+            print(
+                f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n",
+                file=f)
 
 
 def fused_moe(
     hidden_states: torch.Tensor,
-    qweights_1: torch.Tensor, qscales_1: torch.Tensor, qzeros_1: torch.Tensor, g_idx_1: torch.Tensor,
-    qweights_2: torch.Tensor, qscales_2: torch.Tensor, qzeros_2: torch.Tensor, g_idx_2: torch.Tensor,
+    qweights_1: torch.Tensor,
+    qscales_1: torch.Tensor,
+    qzeros_1: torch.Tensor,
+    g_idx_1: torch.Tensor,
+    qweights_2: torch.Tensor,
+    qscales_2: torch.Tensor,
+    qzeros_2: torch.Tensor,
+    g_idx_2: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
@@ -285,7 +326,8 @@ def fused_moe(
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
     # assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
-    assert gating_output.shape[1] == qweights_1.shape[0], "Number of experts mismatch"
+    assert gating_output.shape[1] == qweights_1.shape[
+        0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     # assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     # assert w2.is_contiguous(), "Expert weights2 must be contiguous"
@@ -294,8 +336,9 @@ def fused_moe(
     ]
 
     # permute qweights
-    qweights_1 = qweights_1.permute(0, 2, 1) # (E, K, N)
-    qweights_2 = qweights_2.permute(0, 2, 1) # (E, N, K // packing_factor // tp_size)
+    qweights_1 = qweights_1.permute(0, 2, 1)  # (E, K, N)
+    qweights_2 = qweights_2.permute(
+        0, 2, 1)  # (E, N, K // packing_factor // tp_size)
 
     M, _ = hidden_states.shape
     E, N, _ = qweights_1.shape
@@ -305,14 +348,15 @@ def fused_moe(
         config = override_config
     else:
         # First try to load optimal config from the file
-        # We need to multiply by 2 here, since 
+        # We need to multiply by 2 here, since
         configs = get_moe_configs(E, qweights_2.shape[2] * 2)
 
         if configs:
             # If an optimal configuration map has been found, look up the
             # optimal config
             # print("using...")
-            config = configs[min(configs.keys(), key=lambda x: abs(int(x) - M))]
+            config = configs[min(configs.keys(),
+                                 key=lambda x: abs(int(x) - M))]
             # print(config)
         else:
             # Else use the default config
@@ -335,23 +379,26 @@ def fused_moe(
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
     intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
-                                    device=hidden_states.device,
-                                    dtype=hidden_states.dtype)
-    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], qweights_2.shape[1]),
-                                    device=hidden_states.device,
-                                    dtype=hidden_states.dtype)
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+    intermediate_cache3 = torch.empty(
+        (M, topk_ids.shape[1], qweights_2.shape[1]),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    invoke_fused_moe_kernel(hidden_states, qweights_1, qscales_1, qzeros_1, g_idx_1, intermediate_cache1,
-                            topk_weights, topk_ids, sorted_token_ids,
-                            expert_ids, num_tokens_post_padded, False,
-                            topk_ids.shape[1], num_bits, config)
+    invoke_fused_moe_kernel(hidden_states, qweights_1, qscales_1, qzeros_1,
+                            g_idx_1, intermediate_cache1, topk_weights,
+                            topk_ids, sorted_token_ids, expert_ids,
+                            num_tokens_post_padded, False, topk_ids.shape[1],
+                            num_bits, config)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    invoke_fused_moe_kernel(intermediate_cache2, qweights_2, qscales_2, qzeros_2, g_idx_2, intermediate_cache3,
+    invoke_fused_moe_kernel(intermediate_cache2, qweights_2, qscales_2,
+                            qzeros_2, g_idx_2, intermediate_cache3,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
                             num_bits, config)
