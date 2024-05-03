@@ -245,9 +245,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
-def get_config_file_name(E: int, N: int) -> str:
+def get_config_file_name(E: int, N: int, quant: bool = False) -> str:
     device_name = torch.cuda.get_device_name().replace(" ", "_")
-    return f"E={E},N={N},device_name={device_name}.json"
+    if not quant:
+        return f"E={E},N={N},device_name={device_name}.json"
+    else:
+        return f"E={E},N={N},device_name={device_name}-quant.json"
 
 
 def fused_topk(
