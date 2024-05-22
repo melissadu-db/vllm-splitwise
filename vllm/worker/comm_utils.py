@@ -163,8 +163,8 @@ class KVCacheCommManager:
 
         # Setup up connections.
         self.corr_worker_rank = (rank + num_prompt_workers) % world_size
-        transport = self.mscclpp_group.my_ib_device(rank %
-                                                    get_total_num_gpus())
+        transport = mscclpp_comm.Transport.CudaIpc
+        # transport = self.mscclpp_group.my_ib_device(rank % get_total_num_gpus())        
         self.mscclpp_conns = self.mscclpp_group.make_connection(
             [self.corr_worker_rank], transport)
 

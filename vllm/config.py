@@ -403,6 +403,9 @@ class ParallelConfig:
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported with pipeline parallelism.")
+            
+    def __str__(self) -> str:
+        return f"ParallelConfig(pipeline_parallel_size={self.pipeline_parallel_size}, tensor_parallel_size={self.tensor_parallel_size}, worker_use_ray={self.worker_use_ray}, max_parallel_loading_workers={self.max_parallel_loading_workers}, disable_custom_all_reduce={self.disable_custom_all_reduce}, sep_prompt_token={self.sep_prompt_token})"
 
 
 class SchedulerConfig:
