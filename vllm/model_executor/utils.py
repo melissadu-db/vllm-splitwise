@@ -1,10 +1,18 @@
 """Utils for model executor."""
 import random
 import importlib
+import importlib
 from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
+
+from vllm.config import DeviceConfig, ModelConfig
+
+DEVICE_TO_MODEL_LOADER_MAP = {
+    "cuda": "model_loader",
+    "neuron": "neuron_model_loader",
+}
 
 from vllm.config import DeviceConfig, ModelConfig
 

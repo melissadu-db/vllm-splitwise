@@ -1,9 +1,13 @@
 import asyncio
 import os
+import os
 import time
 from functools import partial
 from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
+from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
                     Union, AsyncIterator)
+
+from transformers import PreTrainedTokenizer
 
 from transformers import PreTrainedTokenizer
 
@@ -12,11 +16,14 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_ray_cluster, ray
+from vllm.engine.ray_utils import initialize_ray_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
+ENGINE_ITERATION_TIMEOUT_S = int(
+    os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 ENGINE_ITERATION_TIMEOUT_S = int(
     os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 
@@ -28,6 +35,9 @@ class AsyncEngineDeadError(RuntimeError):
 def _raise_exception_on_finish(
         task: asyncio.Task, error_callback: Callable[[Exception],
                                                      None]) -> None:
+def _raise_exception_on_finish(
+        task: asyncio.Task, error_callback: Callable[[Exception],
+                                                     None]) -> None:
     msg = ("Task finished unexpectedly. This should never happen! "
            "Please open an issue on Github.")
 
@@ -35,7 +45,18 @@ def _raise_exception_on_finish(
     try:
         task.result()
         # NOTE: This will be thrown if task exits normally (which it should not)
+
+    exception = None
+    try:
+        task.result()
+        # NOTE: This will be thrown if task exits normally (which it should not)
         raise AsyncEngineDeadError(msg)
+    except Exception as e:
+        exception = e
+        logger.error("Engine background task failed", exc_info=e)
+        error_callback(exception)
+        raise AsyncEngineDeadError(
+            msg + " See stack trace above for the actual cause.") from e
     except Exception as e:
         exception = e
         logger.error("Engine background task failed", exc_info=e)
@@ -53,6 +74,7 @@ class AsyncStream:
         self._queue = asyncio.Queue()
         self._finished = False
 
+    def put(self, item: Union[RequestOutput, Exception]) -> None:
     def put(self, item: Union[RequestOutput, Exception]) -> None:
         if self._finished:
             return
@@ -85,10 +107,13 @@ class RequestTracker:
         self._new_requests: asyncio.Queue[Tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
+        self.new_requests_event = asyncio.Event()
 
     def __contains__(self, item):
         return item in self._request_streams
 
+    def __len__(self) -> int:
+        return len(self._request_streams)
     def __len__(self) -> int:
         return len(self._request_streams)
 
@@ -100,9 +125,12 @@ class RequestTracker:
         if request_id is not None:
             self._request_streams[request_id].put(exc)
             self.abort_request(request_id)
+            self.abort_request(request_id)
         else:
             for rid, stream in self._request_streams.items():
+            for rid, stream in self._request_streams.items():
                 stream.put(exc)
+                self.abort_request(rid)
                 self.abort_request(rid)
 
     def process_request_output(self,
@@ -114,6 +142,20 @@ class RequestTracker:
 
         self._request_streams[request_id].put(request_output)
         if request_output.finished:
+            if verbose:
+                logger.info(f"Finished request {request_id}.")
+            self.abort_request(request_id)
+
+    def process_exception(self,
+                          request_id: str,
+                          exception: Exception,
+                          *,
+                          verbose: bool = False) -> None:
+        """Propagate an exception from the engine."""
+        self._request_streams[request_id].put(exception)
+        if verbose:
+            logger.info(f"Finished request {request_id}.")
+        self.abort_request(request_id)
             if verbose:
                 logger.info(f"Finished request {request_id}.")
             self.abort_request(request_id)
@@ -183,6 +225,12 @@ class RequestTracker:
         return new_requests, finished_requests
 
     async def wait_for_new_requests(self):
+        if not self.has_new_requests():
+            await self.new_requests_event.wait()
+        self.new_requests_event.clear()
+
+    def has_new_requests(self):
+        return not self._new_requests.empty()
         if not self.has_new_requests():
             await self.new_requests_event.wait()
         self.new_requests_event.clear()
@@ -261,6 +309,8 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
         )
 
+    async def check_health_async(self) -> None:
+        self.model_executor.check_health()
     async def check_health_async(self) -> None:
         self.model_executor.check_health()
 
@@ -344,10 +394,63 @@ class AsyncLLMEngine:
                      max_log_len=engine_args.max_log_len,
                      start_engine_loop=start_engine_loop)
         return engine
+        self._request_tracker: Optional[RequestTracker] = None
+        self._errored_with: Optional[BaseException] = None
+
+    @classmethod
+    def from_engine_args(cls,
+                         engine_args: AsyncEngineArgs,
+                         start_engine_loop: bool = True) -> "AsyncLLMEngine":
+        """Creates an async LLM engine from the engine arguments."""
+        # Create the engine configs.
+        engine_configs = engine_args.create_engine_configs()
+        parallel_config = engine_configs[2]
+        if parallel_config.worker_use_ray or engine_args.engine_use_ray:
+            initialize_ray_cluster(parallel_config)
+            from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
+            executor_class = RayGPUExecutorAsync
+        else:
+            assert parallel_config.world_size == 1, (
+                "Ray is required if parallel_config.world_size > 1.")
+            from vllm.executor.gpu_executor import GPUExecutorAsync
+            executor_class = GPUExecutorAsync
+        # Create the async LLM engine.
+        engine = cls(parallel_config.worker_use_ray,
+                     engine_args.engine_use_ray,
+                     *engine_configs,
+                     executor_class,
+                     log_requests=not engine_args.disable_log_requests,
+                     log_stats=not engine_args.disable_log_stats,
+                     max_log_len=engine_args.max_log_len,
+                     start_engine_loop=start_engine_loop)
+        return engine
 
     @property
     def is_running(self) -> bool:
         return (self.background_loop is not None
+                and not self._background_loop_unshielded.done())
+
+    @property
+    def is_stopped(self) -> bool:
+        return self.errored or (self.background_loop is not None
+                                and self._background_loop_unshielded.done())
+
+    @property
+    def errored(self) -> bool:
+        return self._errored_with is not None
+
+    def set_errored(self, exc: Exception) -> None:
+        self._errored_with = exc
+
+    def _error_callback(self, exc: Exception) -> None:
+        self.set_errored(exc)
+        self._request_tracker.propagate_exception(exc)
+
+    async def get_tokenizer(self) -> "PreTrainedTokenizer":
+        if self.engine_use_ray:
+            return await self.engine.get_tokenizer.remote()
+        else:
+            return self.engine.get_tokenizer()
                 and not self._background_loop_unshielded.done())
 
     @property
@@ -377,8 +480,13 @@ class AsyncLLMEngine:
         if self.errored:
             raise AsyncEngineDeadError(
                 "Background loop has errored already.") from self._errored_with
+        if self.errored:
+            raise AsyncEngineDeadError(
+                "Background loop has errored already.") from self._errored_with
         if self.is_running:
             raise RuntimeError("Background loop is already running.")
+        # Initialize the RequestTracker here so it uses the right event loop.
+        self._request_tracker = RequestTracker()
         # Initialize the RequestTracker here so it uses the right event loop.
         self._request_tracker = RequestTracker()
 
@@ -386,6 +494,7 @@ class AsyncLLMEngine:
         ).create_task(self.run_engine_loop())
         self._background_loop_unshielded.add_done_callback(
             partial(_raise_exception_on_finish,
+                    error_callback=self._error_callback))
                     error_callback=self._error_callback))
         self.background_loop = asyncio.shield(self._background_loop_unshielded)
 
@@ -431,6 +540,18 @@ class AsyncLLMEngine:
                     e,
                     verbose=self.log_requests,
                 )
+            try:
+                if self.engine_use_ray:
+                    await self.engine.add_request.remote(**new_request)
+                else:
+                    await self.engine.add_request_async(**new_request)
+            except ValueError as e:
+                # TODO: use a vLLM specific error for failed validation
+                self._request_tracker.process_exception(
+                    new_request["request_id"],
+                    e,
+                    verbose=self.log_requests,
+                )
 
         if finished_requests:
             await self._engine_abort(finished_requests)
@@ -458,7 +579,20 @@ class AsyncLLMEngine:
         while True:
             if not has_requests_in_progress:
                 logger.debug("Waiting for new requests...")
+                logger.debug("Waiting for new requests...")
                 await self._request_tracker.wait_for_new_requests()
+                logger.debug("Got new requests!")
+
+            # Abort if iteration takes too long due to unrecoverable errors
+            # (eg. NCCL timeouts).
+            try:
+                has_requests_in_progress = await asyncio.wait_for(
+                    self.engine_step(), ENGINE_ITERATION_TIMEOUT_S)
+            except asyncio.TimeoutError as exc:
+                logger.error(
+                    "Engine iteration timed out. This should never happen!")
+                self.set_errored(exc)
+                raise
                 logger.debug("Got new requests!")
 
             # Abort if iteration takes too long due to unrecoverable errors
@@ -529,6 +663,7 @@ class AsyncLLMEngine:
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
             arrival_time=arrival_time,
+            lora_request=lora_request)
             lora_request=lora_request)
 
         return stream

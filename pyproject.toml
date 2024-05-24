@@ -9,6 +9,10 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -26,9 +30,27 @@ select = [
 ]
 ignore = [
     # star imports
-    "F405", "F403",
+    "F405",
+    "F403",
     # lambda expression assignment
     "E731",
-    # line too long, handled by black formatting
-    "E501",
+    # .strip() with multi-character strings
+    "B005",
+    # Loop control variable not used within loop body
+    "B007",
+    "E501", # Line too long, TODO: fix this
 ]
+
+[tool.mypy]
+python_version = "3.8"
+
+ignore_missing_imports = true
+
+files = "vllm"
+# TODO(woosuk): Include the code from Megatron and HuggingFace.
+exclude = "vllm/model_executor/parallel_utils/|vllm/model_executor/models/"
+
+
+[tool.codespell]
+ignore-words-list = "dout, te, indicies"
+skip = "./tests/prompts"

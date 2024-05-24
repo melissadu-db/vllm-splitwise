@@ -1,6 +1,9 @@
 import pickle
 
 from typing import Optional, List, Tuple
+import pickle
+
+from typing import Optional, List, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -20,6 +23,11 @@ try:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
             self.worker = None
+            # Since the compiled DAG runs a main execution
+            # in a different thread that calls cuda.set_device.
+            # The flag indicates is set_device is called on
+            # that thread.
+            self.compiled_dag_cuda_device_set = False
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
             # The flag indicates is set_device is called on
@@ -58,6 +66,17 @@ try:
             output = pickle.dumps(output)
             return output
 
+        def execute_model_compiled_dag_remote(self, ignored):
+            """Used only when compiled DAG is enabled."""
+            import torch
+            if not self.compiled_dag_cuda_device_set:
+                torch.cuda.set_device(self.worker.device)
+                self.compiled_dag_cuda_device_set = True
+
+            output = self.worker.execute_model()
+            output = pickle.dumps(output)
+            return output
+
 except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "
                    "For distributed inference, please install Ray with "
@@ -67,8 +86,15 @@ except ImportError as e:
 
 
 def initialize_ray_cluster(
+def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: Optional[str] = None,
+):
+    """Initialize the distributed cluster with Ray.
+
+    it will connect to the Ray cluster and create a placement group
+    for the workers, which includes the specification of the resources
+    for each distributed worker.
 ):
     """Initialize the distributed cluster with Ray.
 
@@ -93,7 +119,22 @@ def initialize_ray_cluster(
                  num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
+    if ray is None:
+        raise ImportError(
+            "Ray is not installed. Please install Ray to use distributed "
+            "serving.")
 
+    # Connect to a ray cluster.
+    if is_hip():
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 num_gpus=parallel_config.world_size)
+    else:
+        ray.init(address=ray_address, ignore_reinit_error=True)
+
+    if parallel_config.placement_group:
+        # Placement group is already set.
+        return
     if parallel_config.placement_group:
         # Placement group is already set.
         return

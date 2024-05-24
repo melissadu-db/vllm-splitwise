@@ -4,6 +4,7 @@ import socket
 import subprocess
 import uuid
 import gc
+import gc
 from platform import uname
 from typing import Dict, List, Tuple, Union
 from packaging.version import parse, Version
@@ -172,12 +173,24 @@ def is_neuron() -> bool:
     return transformers_neuronx is not None
 
 
+def is_neuron() -> bool:
+    try:
+        import transformers_neuronx
+    except ImportError:
+        transformers_neuronx = None
+    return transformers_neuronx is not None
+
+
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
+    max_shared_mem = (
+        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
+    # will fail
     max_shared_mem = (
         cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
@@ -218,7 +231,16 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 def get_ip() -> str:
     # try ipv4
+    # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    except OSError:
+        # try ipv6
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.connect(("dns.google", 80))
+        return s.getsockname()[0]
     try:
         s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
@@ -244,6 +266,16 @@ def get_open_port() -> int:
         with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             return s.getsockname()[1]
+    # try ipv4
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
+    except OSError:
+        # try ipv6
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
 
 
 def set_cuda_visible_devices(device_ids: List[int]) -> None:
@@ -251,9 +283,17 @@ def set_cuda_visible_devices(device_ids: List[int]) -> None:
 
 
 def get_nvcc_cuda_version() -> Optional[Version]:
+def get_nvcc_cuda_version() -> Optional[Version]:
     cuda_home = os.environ.get('CUDA_HOME')
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
+        if os.path.isfile(cuda_home + '/bin/nvcc'):
+            logger.info(f'CUDA_HOME is not found in the environment. '
+                        f'Using {cuda_home} as CUDA_HOME.')
+        else:
+            logger.warning(
+                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            return None
         if os.path.isfile(cuda_home + '/bin/nvcc'):
             logger.info(f'CUDA_HOME is not found in the environment. '
                         f'Using {cuda_home} as CUDA_HOME.')
@@ -277,6 +317,7 @@ def _generate_random_fp8_e5m2(
     # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
     # it may occur Inf or NaN if we directly use torch.randint
     # to generate random data for fp8 data.
+    # For example, s.11111.00 in fp8e5m2 format represents Inf.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
     #-----|-------------|-------------------
@@ -332,7 +373,13 @@ def create_kv_caches_with_random(
                                 dtype=torch_dtype,
                                 device=device)
         if cache_dtype == 'fp8_e5m2':
+        if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(key_cache, -scale, scale)
+        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
+            key_cache.uniform_(-scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             key_cache.uniform_(-scale, scale)
         else:
@@ -347,7 +394,13 @@ def create_kv_caches_with_random(
                                   dtype=torch_dtype,
                                   device=device)
         if cache_dtype == 'fp8_e5m2':
+        if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(value_cache, -scale, scale)
+        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
+            value_cache.uniform_(-scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support value cache of type {cache_dtype}")
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             value_cache.uniform_(-scale, scale)
         else:

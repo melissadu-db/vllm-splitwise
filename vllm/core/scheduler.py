@@ -167,7 +167,7 @@ class Scheduler:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
     def _schedule(self) -> SchedulerOutputs:
-        # Blocks that need to be swaped, copied, or networked before model execution.
+        # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
@@ -333,8 +333,8 @@ class Scheduler:
                 lora_int_id = 0
                 if self.lora_enabled:
                     lora_int_id = seq_group.lora_int_id
-                    if lora_int_id > 0 and lora_int_id not in curr_loras and len(
-                            curr_loras) >= self.lora_config.max_loras:
+                    if (lora_int_id > 0 and lora_int_id not in curr_loras
+                            and len(curr_loras) >= self.lora_config.max_loras):
                         # We don't have a space for another LoRA, so
                         # we ignore this request for now.
                         leftover_swapped.appendleft(seq_group)
@@ -534,7 +534,6 @@ class Scheduler:
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            seq.status = SequenceStatus.SWAPPED
             
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         self.block_manager.mark_blocks_as_computed(seq_group)
