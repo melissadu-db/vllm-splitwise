@@ -490,6 +490,7 @@ class ModelRunner:
         blocks_to_nw: Optional[Dict[int, List[int]]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
+        stage_group = get_stage_parallel_group()
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.

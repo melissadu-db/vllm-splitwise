@@ -3,19 +3,21 @@ from collections import defaultdict
 import os
 import time
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
-                    Union)
+                    Type, Union)
 
+import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
-from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster, ray
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
+from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
@@ -23,7 +25,6 @@ from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port,
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
@@ -67,11 +68,12 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        executor_class: Type[ExecutorBase],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
         logger.info(
-            "Initializing an LLM engine with config: "
+            f"Initializing an LLM engine (v{vllm.__version__}) with config: "
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
@@ -83,7 +85,8 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
+            f"disable_custom_all_reduce="
+            f"{parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
@@ -387,11 +390,23 @@ class LLMEngine:
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
         parallel_config = engine_configs[2]
-        # Initialize the cluster.
-        placement_group = initialize_cluster(parallel_config)
+        placement_group = initialize_ray_cluster(parallel_config)
+
+        # Initialize the cluster and specify the executor class.
+        if parallel_config.worker_use_ray:
+            initialize_ray_cluster(parallel_config)
+            from vllm.executor.ray_gpu_executor import RayGPUExecutor
+            executor_class = RayGPUExecutor
+        else:
+            assert parallel_config.world_size == 1, (
+                "Ray is required if parallel_config.world_size > 1.")
+            from vllm.executor.gpu_executor import GPUExecutor
+            executor_class = GPUExecutor
+
         # Create the LLM engine.
         engine = cls(*engine_configs,
-                     placement_group,
+                     executor_class=executor_class,
+                     placement_group=placement_group,
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
@@ -488,7 +503,7 @@ class LLMEngine:
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, prefix)
+                                  arrival_time, lora_request)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
@@ -747,8 +762,16 @@ class LLMEngine:
     def _process_model_outputs(
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+        now = time.time()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+
+        # If prefix caching is enabled, mark all blocks in the sequence groups
+        # as completed so that future requests don't attempt to recompute them
+        if self.cache_config.enable_prefix_caching:
+            for seq_group in scheduled_seq_groups:
+                self.scheduler.mark_blocks_as_computed(seq_group)
+
         for seq_group, outputs in zip(scheduled_seq_groups, output):
             self._process_sequence_group_outputs(seq_group, outputs)
 
@@ -758,17 +781,12 @@ class LLMEngine:
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for seq_group in scheduled_seq_groups:
+            seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         for seq_group in scheduler_outputs.ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
-
-        # Update prefix state, now all the uncomputed prefixes are computed.
-        for seq_group in scheduled_seq_groups:
-            if (seq_group.prefix is not None and seq_group.prefix.allocated
-                    and not seq_group.prefix.computed):
-                seq_group.prefix.computed = True
 
         # Log stats.
         if self.log_stats:
@@ -794,7 +812,7 @@ class LLMEngine:
                 - A Sequence Group (SG) refer to a group of sequences
                   that are generated from the same prompt.
 
-            - Step 2: Calls the workers to execute the model.
+            - Step 2: Calls the distributed executor to execute the model.
             - Step 3: Processes the model output. This mainly includes:
 
                 - Decodes the relevant outputs.
@@ -902,18 +920,25 @@ class LLMEngine:
 
             # Number of Tokens.
             if prompt_run:
-                num_prompt_tokens = scheduler_outputs.num_batched_tokens
+                num_prompt_tokens = sum(
+                    len(seq_group.prompt_token_ids)
+                    for seq_group in scheduler_outputs.scheduled_seq_groups)
+                num_generation_tokens = sum(
+                    seq_group.num_seqs()
+                    for seq_group in scheduler_outputs.scheduled_seq_groups)
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
 
             # Latency Timings.
             time_last_iters = []
             for seq_group in scheduler_outputs.scheduled_seq_groups:
-                # Time since last token. (n.b. updates seq_group.last_token_time)
+                # Time since last token.
+                # (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))
                 # Time since arrival for all finished requests.
                 if seq_group.is_finished():
-                    time_e2e_requests.append(now - seq_group.arrival_time)
+                    time_e2e_requests.append(now -
+                                             seq_group.metrics.arrival_time)
 
             time_to_first_tokens = time_last_iters if prompt_run else []
             time_per_output_tokens = [] if prompt_run else time_last_iters
@@ -932,12 +957,37 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
+    def _decode_logprobs(self, seq: Sequence, prms: SamplingParams,
+                         logprobs: Dict[int, Logprob],
+                         all_input_ids: List[int]) -> None:
+        if not logprobs:
+            return
+        for token_id, sample_logprob in logprobs.items():
+            if (sample_logprob.decoded_token is None and token_id != -1):
+                all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
+                (_, new_text, prefix_offset,
+                 read_offset) = detokenize_incrementally(
+                     self.get_tokenizer_for_seq(seq),
+                     all_input_ids=all_input_ids_with_logprob,
+                     prev_tokens=seq.tokens,
+                     prefix_offset=seq.prefix_offset,
+                     read_offset=seq.read_offset,
+                     skip_special_tokens=prms.skip_special_tokens,
+                     spaces_between_special_tokens=prms.
+                     spaces_between_special_tokens,
+                 )
+                sample_logprob.decoded_token = new_text
+
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
+        all_input_ids = seq.get_token_ids()
+        self._decode_logprobs(seq, prms, seq.output_logprobs[-1],
+                              all_input_ids)
+
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
              self.get_tokenizer_for_seq(seq),
-             all_input_ids=seq.get_token_ids(),
+             all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
@@ -978,35 +1028,33 @@ class LLMEngine:
             return
 
         # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos) and seq.get_last_token_id()
-                == self.get_tokenizer_for_seq(seq).eos_token_id):
+        if ((not sampling_params.ignore_eos)
+                and seq.get_last_token_id() == seq.eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
     def _finalize_sequence(self, seq: Sequence,
                            sampling_params: SamplingParams,
                            stop_string: str) -> None:
-        if not sampling_params.include_stop_str_in_output and stop_string:
+        if sampling_params.include_stop_str_in_output:
+            return
+
+        if stop_string and seq.output_text.endswith(stop_string):
             # Truncate the output text so that the stop string is
             # not included in the output.
             seq.output_text = seq.output_text[:-len(stop_string)]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "add_lora",
-            lora_request=lora_request,
-        )
+        return self.model_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        assert lora_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "remove_lora",
-            lora_id=lora_id,
-        )
+        return self.model_executor.remove_lora(lora_id)
 
     def list_loras(self) -> List[int]:
-        return self._run_workers("list_loras")
+        return self.model_executor.list_loras()
+
+    def check_health(self) -> None:
+        self.model_executor.check_health()
 
     def _run_workers(
         self,
