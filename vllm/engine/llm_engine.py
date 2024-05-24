@@ -74,7 +74,6 @@ class LLMEngine:
     ) -> None:
         logger.info(
             f"Initializing an LLM engine (v{vllm.__version__}) with config: "
-            f"Initializing an LLM engine (v{vllm.__version__}) with config: "
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
@@ -138,43 +137,36 @@ class LLMEngine:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
-            self.stat_logger.info("cache_config", self.cache_config)
+            self.stat_logger.info("cache_config", self.cache_config)    
 
-    @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
-        """Creates an LLM engine from the engine arguments."""
-        # Create the engine configs.
-        engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
-
-        # Initialize the cluster and specify the executor class.
-        if parallel_config.worker_use_ray:
-            initialize_ray_cluster(parallel_config)
-            from vllm.executor.ray_gpu_executor import RayGPUExecutor
-            executor_class = RayGPUExecutor
-        else:
-            assert parallel_config.world_size == 1, (
-                "Ray is required if parallel_config.world_size > 1.")
-            from vllm.executor.gpu_executor import GPUExecutor
-            executor_class = GPUExecutor
-
-        # Create the LLM engine.
-        engine = cls(*engine_configs,
-                     executor_class=executor_class,
-                     log_stats=not engine_args.disable_log_stats)
-        return engine
-
-    def __reduce__(self):
-        # This is to ensure that the LLMEngine is not referenced in
-        # the closure used to initialize Ray worker actors
-        raise RuntimeError("LLMEngine should not be pickled!")
-
-    def get_tokenizer(self) -> "PreTrainedTokenizer":
-        return self.tokenizer.get_lora_tokenizer()
-
-    def get_tokenizer_for_seq(self,
-                              sequence: Sequence) -> "PreTrainedTokenizer":
+    def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
+
+    def _init_workers(self):
+        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        # before CUDA_VISIBLE_DEVICES is set in the Worker
+        from vllm.worker.worker import Worker
+
+        assert self.parallel_config.world_size == 1, (
+            "Ray is required if parallel_config.world_size > 1.")
+
+        self.workers: List[Worker] = []
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
+        self.driver_worker = Worker(
+            self.model_config,
+            self.parallel_config,
+            self.scheduler_config,
+            self.device_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method=distributed_init_method,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
+            is_driver_worker=True,
+        )
+        self._run_workers("init_model")
+        self._run_workers("load_model")
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
         init_kwargs = dict(
@@ -424,6 +416,11 @@ class LLMEngine:
                      placement_group=placement_group,
                      log_stats=not engine_args.disable_log_stats)
         return engine
+
+    def __reduce__(self):
+        # This is to ensure that the LLMEngine is not referenced in
+        # the closure used to initialize Ray worker actors
+        raise RuntimeError("LLMEngine should not be pickled!")
 
     def encode_request(
         self,
@@ -781,7 +778,6 @@ class LLMEngine:
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         now = time.time()
-        now = time.time()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
 
@@ -807,7 +803,6 @@ class LLMEngine:
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for seq_group in scheduled_seq_groups:
-            seq_group.maybe_set_first_token_time(now)
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
@@ -839,7 +834,6 @@ class LLMEngine:
                 - A Sequence Group (SG) refer to a group of sequences
                   that are generated from the same prompt.
 
-            - Step 2: Calls the distributed executor to execute the model.
             - Step 2: Calls the distributed executor to execute the model.
             - Step 3: Processes the model output. This mainly includes:
 
@@ -954,12 +948,6 @@ class LLMEngine:
                 num_generation_tokens = sum(
                     seq_group.num_seqs()
                     for seq_group in scheduler_outputs.scheduled_seq_groups)
-                num_prompt_tokens = sum(
-                    len(seq_group.prompt_token_ids)
-                    for seq_group in scheduler_outputs.scheduled_seq_groups)
-                num_generation_tokens = sum(
-                    seq_group.num_seqs()
-                    for seq_group in scheduler_outputs.scheduled_seq_groups)
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
 
@@ -968,13 +956,9 @@ class LLMEngine:
             for seq_group in scheduler_outputs.scheduled_seq_groups:
                 # Time since last token.
                 # (n.b. updates seq_group.metrics.last_token_time)
-                # Time since last token.
-                # (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))
                 # Time since arrival for all finished requests.
                 if seq_group.is_finished():
-                    time_e2e_requests.append(now -
-                                             seq_group.metrics.arrival_time)
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
 
@@ -995,26 +979,6 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
-    def _decode_logprobs(self, seq: Sequence, prms: SamplingParams,
-                         logprobs: Dict[int, Logprob],
-                         all_input_ids: List[int]) -> None:
-        if not logprobs:
-            return
-        for token_id, sample_logprob in logprobs.items():
-            if (sample_logprob.decoded_token is None and token_id != -1):
-                all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
-                (_, new_text, prefix_offset,
-                 read_offset) = detokenize_incrementally(
-                     self.get_tokenizer_for_seq(seq),
-                     all_input_ids=all_input_ids_with_logprob,
-                     prev_tokens=seq.tokens,
-                     prefix_offset=seq.prefix_offset,
-                     read_offset=seq.read_offset,
-                     skip_special_tokens=prms.skip_special_tokens,
-                     spaces_between_special_tokens=prms.
-                     spaces_between_special_tokens,
-                 )
-                sample_logprob.decoded_token = new_text
 
     def _decode_logprobs(self, seq: Sequence, prms: SamplingParams,
                          logprobs: Dict[int, Logprob],
@@ -1039,10 +1003,6 @@ class LLMEngine:
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
-        all_input_ids = seq.get_token_ids()
-        self._decode_logprobs(seq, prms, seq.output_logprobs[-1],
-                              all_input_ids)
-
         all_input_ids = seq.get_token_ids()
         self._decode_logprobs(seq, prms, seq.output_logprobs[-1],
                               all_input_ids)
@@ -1108,10 +1068,8 @@ class LLMEngine:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
-        return self.model_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
         return self.model_executor.remove_lora(lora_id)
 
     def list_loras(self) -> List[int]:
