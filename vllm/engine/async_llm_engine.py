@@ -183,9 +183,12 @@ class _AsyncLLMEngine(LLMEngine):
         the sequences and returns the newly generated results.
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
-
-        if not scheduler_outputs.is_empty():
-            # Execute the model.
+        if scheduler_outputs.is_empty():
+            output = []
+        
+        # Execute the model.
+        elif self.parallel_config.sep_prompt_token:
+        
             all_outputs = await self._run_workers_async(
                 "execute_model",
                 driver_kwargs={
@@ -193,12 +196,25 @@ class _AsyncLLMEngine(LLMEngine):
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    "blocks_to_nw": scheduler_outputs.blocks_to_nw,
                 })
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
         else:
-            output = []
+            # Execute the model.
+            all_outputs = self._run_workers(
+                "execute_model",
+                driver_kwargs={
+                    "seq_group_metadata_list": seq_group_metadata_list,
+                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
+                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
+                    "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    "blocks_to_nw": {},
+                })
+
+            # Only the driver worker returns the sampling results.
+            output = all_outputs[0]
 
         return self._process_model_outputs(output, scheduler_outputs)
 

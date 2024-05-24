@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import copy
 
 import torch
@@ -27,6 +27,7 @@ class MultiStepWorker(Worker):
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
         num_steps: int,
+        blocks_to_nw: Optional[Dict[int, List[int]]] = None,
     ) -> List[SamplerOutput]:
         """Run the model forward pass num_steps times. Returns the list of
         sampler output, one per model forward pass.
@@ -39,6 +40,8 @@ class MultiStepWorker(Worker):
         copied_seq_group_metadata_list = self._shallow_copy_inputs(
             seq_group_metadata_list)
 
+        print("Copied_seq_group_metadata_list", seq_group_metadata_list, copied_seq_group_metadata_list)
+
         # Assert enough KV space for num_steps tokens per sequence.
         self._assert_enough_kv_space(seq_group_metadata_list, num_steps)
 
@@ -50,6 +53,7 @@ class MultiStepWorker(Worker):
                 blocks_to_swap_in=blocks_to_swap_in,
                 blocks_to_swap_out=blocks_to_swap_out,
                 blocks_to_copy=blocks_to_copy,
+                blocks_to_nw=blocks_to_nw,
             )
 
             self._append_new_tokens(model_output,

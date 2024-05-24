@@ -6,8 +6,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn
 
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm import LLM
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
@@ -20,7 +21,6 @@ engine = None
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
-
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
@@ -40,7 +40,6 @@ async def generate(request: Request) -> Response:
 
     results_generator = engine.generate(prompt,
                                         sampling_params,
-                                        request_id,
                                         prefix_pos=prefix_pos)
 
     # Streaming case
@@ -58,7 +57,8 @@ async def generate(request: Request) -> Response:
 
     # Non-streaming case
     final_output = None
-    async for request_output in results_generator:
+    # async for request_output in results_generator:
+    for request_output in results_generator:
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await engine.abort(request_id)
@@ -86,8 +86,11 @@ if __name__ == "__main__":
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    # engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine_args = EngineArgs.from_cli_args(args)
+    # engine = AsyncLLMEngine.from_engine_args(engine_args)
+    engine = LLM(model="facebook/opt-125m", sep_prompt_token=True, tensor_parallel_size=2)
+    # engine = LLM(engine_args)
 
     app.root_path = args.root_path
     uvicorn.run(app,

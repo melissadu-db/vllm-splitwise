@@ -351,3 +351,12 @@ def coalesce_blocks_by_id(blocks_to_nw_dict: Dict[int, List[int]]):
     for cur_id in blocks_to_nw_dict:
         blocks_to_nw_dict[cur_id] = coalesce_blocks(blocks_to_nw_dict[cur_id])
     return blocks_to_nw_dict
+
+def validate_prompt_tokens(prompt_token_ids) -> List[int]:
+        # Convert a single prompt token IDs to a list.
+    print("INPUT: ", prompt_token_ids)
+    # if isinstance(prompt_token_ids, int):
+    #     prompt_token_ids = [prompt_token_ids]
+    # elif isinstance(prompt_token_ids, str):
+    #     prompt_token_ids = [int(prompt_token_ids, 16)]
+    return prompt_token_ids
