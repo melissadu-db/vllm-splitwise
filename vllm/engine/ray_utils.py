@@ -86,15 +86,8 @@ except ImportError as e:
 
 
 def initialize_ray_cluster(
-def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: Optional[str] = None,
-):
-    """Initialize the distributed cluster with Ray.
-
-    it will connect to the Ray cluster and create a placement group
-    for the workers, which includes the specification of the resources
-    for each distributed worker.
 ):
     """Initialize the distributed cluster with Ray.
 
@@ -105,8 +98,8 @@ def initialize_ray_cluster(
     Args:
         parallel_config: The configurations for parallel execution.
         ray_address: The address of the Ray cluster. If None, uses
-            the default Ray cluster address.
-    """
+            the default Ray cluster address."""
+
     if ray is None:
         raise ImportError(
             "Ray is not installed. Please install Ray to use distributed "

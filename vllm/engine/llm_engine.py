@@ -16,7 +16,6 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
-from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
@@ -521,7 +520,6 @@ class LLMEngine:
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request)
                                   arrival_time, lora_request)
 
         # Add the sequence group to the scheduler.
@@ -1053,7 +1051,6 @@ class LLMEngine:
          read_offset) = detokenize_incrementally(
              self.get_tokenizer_for_seq(seq),
              all_input_ids=all_input_ids,
-             all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
@@ -1096,8 +1093,6 @@ class LLMEngine:
         # Check if the sequence has generated the EOS token.
         if ((not sampling_params.ignore_eos)
                 and seq.get_last_token_id() == seq.eos_token_id):
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
@@ -1106,11 +1101,6 @@ class LLMEngine:
                            stop_string: str) -> None:
         if sampling_params.include_stop_str_in_output:
             return
-
-        if stop_string and seq.output_text.endswith(stop_string):
-        if sampling_params.include_stop_str_in_output:
-            return
-
         if stop_string and seq.output_text.endswith(stop_string):
             # Truncate the output text so that the stop string is
             # not included in the output.

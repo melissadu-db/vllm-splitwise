@@ -534,6 +534,7 @@ class Scheduler:
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            seq.status = SequenceStatus.SWAPPED
             
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         self.block_manager.mark_blocks_as_computed(seq_group)

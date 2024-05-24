@@ -83,13 +83,8 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
 
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
-<<<<<<< HEAD
-        # if self.device_config.is_neuron:
-        #     self.model_config.enforce_eager = True
-=======
         if self.device_config.is_neuron:
             self.model_config.enforce_eager = True
->>>>>>> origin/private-merge
 
     def load_model(self) -> None:
         with measure_cuda_memory() as m:

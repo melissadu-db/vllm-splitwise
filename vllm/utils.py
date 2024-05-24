@@ -283,7 +283,6 @@ def set_cuda_visible_devices(device_ids: List[int]) -> None:
 
 
 def get_nvcc_cuda_version() -> Optional[Version]:
-def get_nvcc_cuda_version() -> Optional[Version]:
     cuda_home = os.environ.get('CUDA_HOME')
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
@@ -373,13 +372,7 @@ def create_kv_caches_with_random(
                                 dtype=torch_dtype,
                                 device=device)
         if cache_dtype == 'fp8_e5m2':
-        if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(key_cache, -scale, scale)
-        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
-            key_cache.uniform_(-scale, scale)
-        else:
-            raise ValueError(
-                f"Does not support key cache of type {cache_dtype}")
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             key_cache.uniform_(-scale, scale)
         else:
@@ -394,13 +387,7 @@ def create_kv_caches_with_random(
                                   dtype=torch_dtype,
                                   device=device)
         if cache_dtype == 'fp8_e5m2':
-        if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(value_cache, -scale, scale)
-        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
-            value_cache.uniform_(-scale, scale)
-        else:
-            raise ValueError(
-                f"Does not support value cache of type {cache_dtype}")
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             value_cache.uniform_(-scale, scale)
         else:

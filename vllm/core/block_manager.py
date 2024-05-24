@@ -27,12 +27,6 @@ class BlockAllocator:
                  num_blocks: int,
                  eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
                  enable_caching: bool = False) -> None:
-    def __init__(self,
-                 device: Device,
-                 block_size: int,
-                 num_blocks: int,
-                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
-                 enable_caching: bool = False) -> None:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
@@ -219,7 +213,6 @@ class BlockSpaceManager:
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
-        enable_caching: bool = False,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -360,10 +353,6 @@ class BlockSpaceManager:
             assert new_block.ref_count == 1
         return new_block
 
-    def append_slot(
-        self,
-        seq: Sequence,
-    ) -> Optional[Tuple[int, int]]:
     def _promote_last_block(
         self,
         seq: Sequence,
@@ -485,7 +474,6 @@ class BlockSpaceManager:
         # When forking, we must make sure that each block's `ref_count`
         # is only incremented by one, so we deduplicate them by wrapping
         # them in a set.
-        for block in set(src_block_table):
             block.ref_count += 1
 
     def _get_physical_blocks(
@@ -570,15 +558,6 @@ class BlockSpaceManager:
         return block_number_mapping
 
     def _free_block_table(self, block_table: BlockTable) -> None:
-        # when using a sliding window, each seq will only use up
-        # to `self.block_sliding_window` blocks. When freeing
-        # the block table, we must make sure to not free blocks more
-        # than once. If no sliding window is used, there is no block
-        # reuse in the block table, so we must free all blocks.
-        blocks_to_free = (block_table[-self.block_sliding_window:]
-                          if self.block_sliding_window is not None else
-                          block_table)
-        for block in set(blocks_to_free):
         # when using a sliding window, each seq will only use up
         # to `self.block_sliding_window` blocks. When freeing
         # the block table, we must make sure to not free blocks more
