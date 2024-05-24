@@ -6,7 +6,6 @@ from torch.distributed import ProcessGroup
 
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
     is_cupy_nccl_enabled_for_all_reduce,
@@ -148,8 +147,9 @@ def broadcast_tensor_dict(
 ) -> Dict[Any, Union[torch.Tensor, Any]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
+    # group = torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
-    assert src in ranks, f"Invalid src rank ({src})"
+    assert src in ranks, f"Invalid src rank ({src}), not in {ranks}"
 
     # Bypass the function if we are using only 1 GPU.
     world_size = torch.distributed.get_world_size(group=group)

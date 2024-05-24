@@ -55,6 +55,8 @@ class LLMEngine:
         parallel_config: The configuration related to distributed execution.
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
+        executor_class: The model executor class for managing distributed
+            execution.
         placement_group: Ray placement group for distributed execution.
             Required for distributed execution.
         log_stats: Whether to log statistics.
@@ -85,6 +87,7 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+            f"sep_prompt_token={parallel_config.sep_prompt_token}, "
             f"disable_custom_all_reduce="
             f"{parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
@@ -105,6 +108,10 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
+
+        self.model_executor = executor_class(model_config, cache_config,
+                                             parallel_config, scheduler_config,
+                                             device_config, lora_config)
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
