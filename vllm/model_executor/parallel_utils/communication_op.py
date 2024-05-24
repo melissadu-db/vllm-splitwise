@@ -147,7 +147,6 @@ def broadcast_tensor_dict(
 ) -> Dict[Any, Union[torch.Tensor, Any]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
-    # group = torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src}), not in {ranks}"
 

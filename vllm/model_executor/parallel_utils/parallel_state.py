@@ -4,12 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
-import contextlib
-
 import torch
-
-from vllm.model_executor.parallel_utils import cupy_utils
-
 from vllm.model_executor.parallel_utils import cupy_utils
 
 # Tensor model parallel group that the current rank belongs to.
@@ -229,7 +224,6 @@ def get_pipeline_model_parallel_next_rank():
 
 
 def get_pipeline_model_parallel_prev_rank():
-    """Return the global rank that precedes the caller in the pipeline"""
     """Return the global rank that precedes the caller in the pipeline"""
     assert _PIPELINE_GLOBAL_RANKS is not None, (
         "Pipeline parallel group is not initialized")
