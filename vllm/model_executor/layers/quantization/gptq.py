@@ -1,11 +1,15 @@
 import enum
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from fractions import Fraction
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
+from vllm.model_executor.layers.fused_moe import (moe_align_block_size,
+                                                  fused_topk, quant_fused_moe,
+                                                  fused_moe)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -27,12 +31,11 @@ class GPTQConfig(QuantizationConfig):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
-        self.pack_factor = 32 // self.weight_bits
-        # exllama kernel v1 only supports 4 bit
-        if self.weight_bits != 4:
+        self.pack_factor = Fraction(32, self.weight_bits)
+        if self.weight_bits not in [2, 3, 4, 8]:
             raise ValueError(
-                "Currently, only 4-bit weight quantization is supported for "
-                f"GPTQ, but got {self.weight_bits} bits.")
+                "Currently, only 2/3/4/8-bit weight quantization is "
+                f"supported for GPTQ, but got {self.weight_bits} bits.")
 
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
@@ -69,6 +72,10 @@ class GPTQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def support_fused_moe(self) -> bool:
+        # Fused MoE only supports 4-bit and 8-bit.
+        return self.weight_bits == 4 or self.weight_bits == 8
+
 
 class ExllamaState(Enum):
 
@@ -101,7 +108,8 @@ class GPTQLinearMethod(LinearMethodBase):
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
+        if (output_size_per_partition % self.quant_config.pack_factor.numerator
+                != 0):
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -114,7 +122,8 @@ class GPTQLinearMethod(LinearMethodBase):
         exllama_state = ExllamaState.UNINITIALIZED
         scale_and_zero_size = input_size // group_size
         scale_and_zero_input_dim = None
-        if input_size != input_size_per_partition and self.quant_config.group_size != -1:
+        if (input_size != input_size_per_partition
+                and self.quant_config.group_size != -1):
             # For act-order models, we cannot use Exllama for row parallel layer
             if self.quant_config.desc_act:
                 exllama_state = ExllamaState.UNUSED
@@ -201,11 +210,86 @@ class GPTQLinearMethod(LinearMethodBase):
             else:
                 weights["g_idx"] = torch.empty((1, 1), device="meta")
             weights["exllama_state"] = ExllamaState.READY
-            ops.gptq_shuffle(weights["qweight"], weights["g_idx"])
+            ops.gptq_shuffle(weights["qweight"], weights["g_idx"],
+                             self.quant_config.weight_bits)
         output = ops.gptq_gemm(reshaped_x, weights["qweight"],
                                weights["qzeros"], weights["scales"],
                                weights["g_idx"],
-                               weights["exllama_state"] == ExllamaState.READY)
+                               weights["exllama_state"] == ExllamaState.READY,
+                               self.quant_config.weight_bits)
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)
+
+    def apply_moe_weights(self, w1: Dict[str,
+                                         torch.Tensor], w2: Dict[str,
+                                                                 torch.Tensor],
+                          x: torch.Tensor, gating_output: torch.Tensor,
+                          topk: int, renormalize: bool) -> torch.Tensor:
+        # shuffle weights for exllama
+        for w in [w1, w2]:
+            if w["exllama_state"] == ExllamaState.UNINITIALIZED:
+                if self.quant_config.desc_act:
+                    w["g_idx"] = torch.argsort(w["g_idx"],
+                                               dim=-1).to(torch.int)
+                else:
+                    w["g_idx"] = torch.empty((1, 1), device="meta")
+                w["exllama_state"] = ExllamaState.READY
+                ops.gptq_shuffle(w["qweight"], w["g_idx"],
+                                 self.quant_config.weight_bits)
+
+        # For memory bound workloads: decode and small prefills, use the
+        # fused quant moe. Otherwise, dequantize them individually
+        if x.shape[0] <= 512:
+            return quant_fused_moe(
+                x,
+                w1["qweight"],
+                w1["scales"],
+                w1["qzeros"],
+                w1["g_idx"],
+                w2["qweight"],
+                w2["scales"],
+                w2["qzeros"],
+                w2["g_idx"],
+                gating_output,
+                topk,
+                renormalize,
+                self.quant_config.weight_bits,
+            )
+
+        dequant_w1 = ops.dequant_gptq(
+            w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
+            self.quant_config.weight_bits,
+            w1["exllama_state"] == ExllamaState.READY).permute(0, 2, 1)
+        dequant_w2 = ops.dequant_gptq(
+            w2["qweight"], w2["qzeros"], w2["scales"], w2["g_idx"],
+            self.quant_config.weight_bits,
+            w2["exllama_state"] == ExllamaState.READY).permute(0, 2, 1)
+        return fused_moe(x, dequant_w1, dequant_w2, gating_output, topk,
+                         renormalize)
+
+        topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
+        (sorted_token_ids, expert_ids,
+         num_tokens_post_padded) = moe_align_block_size(
+             topk_ids, 8, w1["qweight"].shape[0])
+
+        x = x.view(x.shape[0], 1, *x.shape[1:])
+        gate_up = ops.group_gptq_gemm(
+            x, w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
+            topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
+            False, w1["exllama_state"] == ExllamaState.READY,
+            self.quant_config.weight_bits)
+
+        out = torch.empty((gate_up.shape[:-1] + (gate_up.shape[-1] // 2, )),
+                          dtype=x.dtype,
+                          device=x.device)
+        ops.silu_and_mul(out, gate_up)
+
+        out = ops.group_gptq_gemm(out, w2["qweight"], w2["qzeros"],
+                                  w2["scales"], w2["g_idx"], topk_weights,
+                                  sorted_token_ids, expert_ids,
+                                  num_tokens_post_padded, True,
+                                  w2["exllama_state"] == ExllamaState.READY,
+                                  self.quant_config.weight_bits)
+
+        return torch.sum(out, dim=1)
