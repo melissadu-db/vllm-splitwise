@@ -1,10 +1,5 @@
+from typing import Optional, List, Tuple, TYPE_CHECKING
 import pickle
-
-from typing import Optional, List, Tuple
-import pickle
-
-from typing import Optional, List, Tuple
-
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import is_hip, set_cuda_visible_devices, get_ip
@@ -84,11 +79,13 @@ except ImportError as e:
     ray = None
     RayWorkerVllm = None
 
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: Optional[str] = None,
-):
+) -> Optional["PlacementGroup"]:
     """Initialize the distributed cluster with Ray.
 
     it will connect to the Ray cluster and create a placement group
@@ -167,3 +164,4 @@ def initialize_ray_cluster(
 
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
+    return current_placement_group

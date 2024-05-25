@@ -54,6 +54,10 @@ class GPUExecutor(ExecutorBase):
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
+        #  from vllm.worker.worker import Worker
+
+        # assert self.parallel_config.world_size == 1, (
+        #     "Ray is required if parallel_config.world_size > 1.")
         Worker = self._dispatch_worker()
 
         assert self.parallel_config.world_size == 1, (

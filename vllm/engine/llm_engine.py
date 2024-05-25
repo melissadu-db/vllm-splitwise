@@ -1,5 +1,7 @@
 import time
 import os
+import copy
+from collections import defaultdict
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Type, Union)
 
@@ -108,23 +110,6 @@ class LLMEngine:
         self._init_tokenizer()
         self.seq_counter = Counter()
 
-        # Create the parallel GPU workers.
-        if self.parallel_config.worker_use_ray:
-            # Disable Ray usage stats collection.
-            ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
-            if ray_usage != "1":
-                os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
-            self._init_workers_ray(placement_group)
-        else:
-            self._init_workers()
-
-        # Profile the memory usage and initialize the cache.
-        self._init_cache()
-
-        if self.parallel_config.sep_prompt_token:
-            # Setup the MSCCL++ communication required for KV cache transfer
-            self._setup_kvcache_comm()
-
         self.model_executor = executor_class(model_config, cache_config,
                                              parallel_config, scheduler_config,
                                              device_config, lora_config)
@@ -142,32 +127,6 @@ class LLMEngine:
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
-    def _init_workers(self):
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
-
-        assert self.parallel_config.world_size == 1, (
-            "Ray is required if parallel_config.world_size > 1.")
-
-        self.workers: List[Worker] = []
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
-        self.driver_worker = Worker(
-            self.model_config,
-            self.parallel_config,
-            self.scheduler_config,
-            self.device_config,
-            local_rank=0,
-            rank=0,
-            distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=True,
-        )
-        self._run_workers("init_model")
-        self._run_workers("load_model")
-
     def _init_tokenizer(self, **tokenizer_init_kwargs):
         init_kwargs = dict(
             enable_lora=bool(self.lora_config),
@@ -180,140 +139,6 @@ class LLMEngine:
         self.tokenizer: TokenizerGroup = TokenizerGroup(
             self.model_config.tokenizer, **init_kwargs)
 
-    def _init_workers_ray(self, placement_group: "PlacementGroup",
-                          **ray_remote_kwargs):
-        if self.parallel_config.tensor_parallel_size == 1:
-            num_gpus = self.cache_config.gpu_memory_utilization
-        else:
-            num_gpus = 1
-
-        self.driver_dummy_worker: RayWorkerVllm = None
-        self.workers: List[RayWorkerVllm] = []
-
-        driver_ip = get_ip()
-        for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get("GPU", 0):
-                continue
-            scheduling_strategy = PlacementGroupSchedulingStrategy(
-                placement_group=placement_group,
-                placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=bundle_id,
-            )
-            worker = ray.remote(
-                num_cpus=0,
-                num_gpus=num_gpus,
-                scheduling_strategy=scheduling_strategy,
-                **ray_remote_kwargs,
-            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
-
-            worker_ip = ray.get(worker.get_node_ip.remote())
-            if worker_ip == driver_ip and self.driver_dummy_worker is None:
-                # If the worker is on the same node as the driver, we use it
-                # as the resource holder for the driver process.
-                self.driver_dummy_worker = worker
-            else:
-                self.workers.append(worker)
-
-        if self.driver_dummy_worker is None:
-            raise ValueError(
-                "Ray does not allocate any GPUs on the driver node. Consider "
-                "adjusting the Ray placement group or running the driver on a "
-                "GPU node.")
-
-        driver_node_id, driver_gpu_ids = ray.get(
-            self.driver_dummy_worker.get_node_and_gpu_ids.remote())
-        worker_node_and_gpu_ids = ray.get(
-            [worker.get_node_and_gpu_ids.remote() for worker in self.workers])
-
-        driver_node_workers = []
-        other_node_workers = []
-        driver_worker_node_and_gpu_ids = []
-        other_worker_node_and_gpu_ids = []
-
-        for worker, (node_id, gpu_ids) in zip(self.workers,
-                                              worker_node_and_gpu_ids):
-            if node_id == driver_node_id:
-                driver_node_workers.append(worker)
-                driver_worker_node_and_gpu_ids.append((node_id, gpu_ids))
-            else:
-                other_node_workers.append(worker)
-                other_worker_node_and_gpu_ids.append((node_id, gpu_ids))
-        self.workers = driver_node_workers + other_node_workers
-        worker_node_and_gpu_ids = driver_worker_node_and_gpu_ids + other_worker_node_and_gpu_ids
-
-        node_workers = defaultdict(list)
-        node_gpus = defaultdict(list)
-
-        node_workers[driver_node_id].append(0)
-        node_gpus[driver_node_id].extend(driver_gpu_ids)
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids,
-                                               start=1):
-            node_workers[node_id].append(i)
-            node_gpus[node_id].extend(gpu_ids)
-        for node_id, gpu_ids in node_gpus.items():
-            node_gpus[node_id] = sorted(gpu_ids)
-
-        # Set CUDA_VISIBLE_DEVICES for the driver.
-        set_cuda_visible_devices(node_gpus[driver_node_id])
-        for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
-            worker.set_cuda_visible_devices.remote(node_gpus[node_id])
-
-        distributed_init_method = get_distributed_init_method(
-            driver_ip, get_open_port())
-        mscclpp_init_method = f"eth0:{driver_ip}:{get_open_port()}" if self.parallel_config.sep_prompt_token else None
-
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
-
-        # Initialize torch distributed process group for the workers.
-        model_config = copy.deepcopy(self.model_config)
-        parallel_config = copy.deepcopy(self.parallel_config)
-        scheduler_config = copy.deepcopy(self.scheduler_config)
-        device_config = copy.deepcopy(self.device_config)
-
-        for rank, (worker, (node_id,
-                            _)) in enumerate(zip(self.workers,
-                                                 worker_node_and_gpu_ids),
-                                             start=1):
-            local_rank = node_workers[node_id].index(rank)
-            worker.init_worker.remote(
-                lambda rank=rank, local_rank=local_rank: Worker(
-                    model_config,
-                    parallel_config,
-                    scheduler_config,
-                    device_config,
-                    local_rank,
-                    rank,
-                    distributed_init_method,
-                    lora_config=self.lora_config,
-                    kv_cache_dtype=self.cache_config.cache_dtype,
-                    mscclpp_init_method=mscclpp_init_method,
-                ))
-
-        driver_rank = 0
-        driver_local_rank = node_workers[driver_node_id].index(driver_rank)
-        self.driver_worker = Worker(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            driver_local_rank,
-            driver_rank,
-            distributed_init_method,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            mscclpp_init_method=mscclpp_init_method,
-            is_driver_worker=True,
-        )
-
-        self._run_workers("init_model")
-        self._run_workers(
-            "load_model",
-            max_concurrent_workers=self.parallel_config.
-            max_parallel_loading_workers,
-        )
-
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
@@ -321,75 +146,6 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
-
-    def _init_cache(self) -> None:
-        """Profiles the memory usage and initializes the KV cache.
-
-        The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
-        More details can be found in the
-        :meth:`~vllm.worker.worker.Worker.profile_num_available_blocks` method
-        from class :class:`~vllm.worker.Worker`.
-
-        Afterwards, as there may be multiple workers,
-        we take the minimum number of blocks across all workers
-        to ensure this can be applied to all of them.
-
-        Finally, the engine will initialize the KV cache
-        with the calculated number of blocks.
-
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameters.
-        """
-        # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers(
-            "profile_num_available_blocks",
-            block_size=self.cache_config.block_size,
-            gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
-            cpu_swap_space=self.cache_config.swap_space_bytes,
-            cache_dtype=self.cache_config.cache_dtype,
-        )
-
-        # Since we use a shared centralized controller, we take the minimum
-        # number of blocks across all workers to make sure all the memory
-        # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks)
-        num_cpu_blocks = min(b[1] for b in num_blocks)
-        # FIXME(woosuk): Change to debug log.
-        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}")
-
-        if num_gpu_blocks <= 0:
-            raise ValueError("No available memory for the cache blocks. "
-                             "Try increasing `gpu_memory_utilization` when "
-                             "initializing the engine.")
-        max_seq_len = self.cache_config.block_size * num_gpu_blocks
-        if self.model_config.max_model_len > max_seq_len:
-            raise ValueError(
-                f"The model's max seq len ({self.model_config.max_model_len}) "
-                "is larger than the maximum number of tokens that can be "
-                f"stored in KV cache ({max_seq_len}). Try increasing "
-                "`gpu_memory_utilization` or decreasing `max_model_len` when "
-                "initializing the engine.")
-
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        # Initialize the cache.
-        self._run_workers("init_cache_engine", cache_config=self.cache_config)
-        # Warm up the model. This includes capturing the model into CUDA graph
-        # if enforce_eager is False.
-        self._run_workers("warm_up_model")
-
-    def _setup_kvcache_comm(self) -> None:
-        """Setup MSCCL++ communication connections for KV cache transfer."""
-        self._run_workers("setup_kvcache_comm")
-
-    def destroy_kvcache_comm(self) -> None:
-        """Stop MSCCL++ communication connections for KV cache transfer."""
-        self._run_workers("destroy_kvcache_comm")
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -399,16 +155,16 @@ class LLMEngine:
         parallel_config = engine_configs[2]
         placement_group = initialize_ray_cluster(parallel_config)
 
-        # Initialize the cluster and specify the executor class.
+        # Create the parallel GPU workers.
         if parallel_config.worker_use_ray:
-            initialize_ray_cluster(parallel_config)
+            # Disable Ray usage stats collection.
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
         else:
             assert parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutor
-            executor_class = GPUExecutor
+            executor_class = GPUExecutor            
 
         # Create the LLM engine.
         engine = cls(*engine_configs,
@@ -871,36 +627,12 @@ class LLMEngine:
 
         if scheduler_outputs.is_empty():
             output = []
-        elif self.parallel_config.sep_prompt_token:
-            # TODO: This will only schedule one set of workers at a time and will not be
-            # able to take advantage of parallely running prompt and token workers.
-            all_outputs = self._run_stage_workers(
-                "execute_model",
-                prompt_stage=seq_group_metadata_list[0].is_prompt,
-                driver_kwargs={
-                    "seq_group_metadata_list": seq_group_metadata_list,
-                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
-                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
-                    "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                    "blocks_to_nw": scheduler_outputs.blocks_to_nw,
-                })
-
-            # Only the driver worker returns the sampling results.
-            output = all_outputs[0]
         else:
-            # Execute the model.
-            all_outputs = self._run_workers(
-                "execute_model",
-                driver_kwargs={
-                    "seq_group_metadata_list": seq_group_metadata_list,
-                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
-                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
-                    "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                    "blocks_to_nw": {},
-                })
-
-            # Only the driver worker returns the sampling results.
-            output = all_outputs[0]
+            output = self.model_executor.execute_model(
+                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
+                scheduler_outputs.blocks_to_swap_out,
+                scheduler_outputs.blocks_to_copy,
+                scheduler_outputs.blocks_to_nw)
 
         return self._process_model_outputs(output, scheduler_outputs)
 
@@ -1078,95 +810,3 @@ class LLMEngine:
     def check_health(self) -> None:
         self.model_executor.check_health()
 
-    def _run_workers(
-        self,
-        method: str,
-        *args,
-        driver_args: Optional[List[Any]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
-        max_concurrent_workers: Optional[int] = None,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
-
-        if max_concurrent_workers:
-            raise NotImplementedError(
-                "max_concurrent_workers is not supported yet.")
-
-        # Start the ray workers first.
-        ray_worker_outputs = [
-            worker.execute_method.remote(method, *args, **kwargs)
-            for worker in self.workers
-        ]
-
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
-
-        # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker,
-                                       method)(*driver_args, **driver_kwargs)
-
-        # Get the results of the ray workers.
-        if self.workers:
-            ray_worker_outputs = ray.get(ray_worker_outputs)
-
-        return [driver_worker_output] + ray_worker_outputs
-
-    def _run_stage_workers(
-        self,
-        method: str,
-        prompt_stage: bool,
-        *args,
-        driver_args: Optional[List[Any]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
-        max_concurrent_workers: Optional[int] = None,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on prompt workers or token workers."""
-
-        assert self.parallel_config.sep_prompt_token
-        if max_concurrent_workers:
-            raise NotImplementedError(
-                "max_concurrent_workers is not supported yet.")
-
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
-
-        if prompt_stage:
-            # Prompt workers include 1 driver worker and num_prompt_workers-1 ray workers.
-            ray_worker_outputs = [
-                worker.execute_method.remote(method, *args, **kwargs)
-                for worker in
-                self.workers[:self.parallel_config.num_prompt_workers - 1]
-            ]
-
-            # Start the driver worker after all the ray workers.
-            driver_worker_output = getattr(self.driver_worker,
-                                           method)(*driver_args,
-                                                   **driver_kwargs)
-
-        else:
-            # Token workers use worker[num_prompt_workers-1] as driver worker.
-            # Start the ray workers first.
-            ray_worker_outputs = [
-                worker.execute_method.remote(method, *args, **kwargs)
-                for worker in
-                self.workers[self.parallel_config.num_prompt_workers:]
-            ]
-
-            # Start the token driver worker after all the ray workers.
-            driver_worker = self.workers[
-                self.parallel_config.num_prompt_workers - 1]
-            driver_worker_output = driver_worker.execute_method.remote(
-                method, *driver_args, **driver_kwargs)
-            driver_worker_output = ray.get(driver_worker_output)
-
-            # Get the results of the ray workers.
-        if self.workers:
-            ray_worker_outputs = ray.get(ray_worker_outputs)
-
-        return [driver_worker_output] + ray_worker_outputs

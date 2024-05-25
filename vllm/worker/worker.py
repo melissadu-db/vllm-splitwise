@@ -123,7 +123,6 @@ class Worker:
 
     def init_kvcache_comm(self,
                           mscclpp_init_method: Optional[str] = None) -> None:
-        print("INIT METHOD: ", mscclpp_init_method)
         if mscclpp_init_method is not None:
             from vllm.worker.comm_utils import KVCacheCommManager
             self.kvcache_comm_manager = KVCacheCommManager(
@@ -143,6 +142,7 @@ class Worker:
                 self.model_runner.is_driver_worker = True
 
     def setup_kvcache_comm(self) -> None:
+        print("Setting up KV cache communication", self.kvcache_comm_manager)
         # Setup the communication for the KV cache.
         if self.kvcache_comm_manager is not None:
             num_layers = self.model_config.get_num_layers(self.parallel_config)

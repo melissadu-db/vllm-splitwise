@@ -4,7 +4,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_ray_cluster
-from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -21,6 +20,5 @@ __all__ = [
     "EngineArgs",
     "AsyncLLMEngine",
     "AsyncEngineArgs",
-    "initialize_ray_cluster",
     "initialize_ray_cluster",
 ]
