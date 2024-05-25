@@ -142,7 +142,6 @@ class Worker:
                 self.model_runner.is_driver_worker = True
 
     def setup_kvcache_comm(self) -> None:
-        print("Setting up KV cache communication", self.kvcache_comm_manager)
         # Setup the communication for the KV cache.
         if self.kvcache_comm_manager is not None:
             num_layers = self.model_config.get_num_layers(self.parallel_config)
@@ -157,19 +156,20 @@ class Worker:
             self.unset_comm_for_attention_modules()
 
     def set_comm_for_attention_modules(self) -> None:
+
         attention_modules = list(
             filter(
-                lambda module: "PagedAttention" in module.__class__.__name__,
+                lambda module: "Attention" == module.__class__.__name__,
                 self.model_runner.model.modules()))
         for i, attention_module in enumerate(attention_modules):
             attention_module.set_kvcache_comm_manager(
                 self.kvcache_comm_manager)
-            attention_module.layer_id = i
+            attention_module.backend.layer_id = i
 
     def unset_comm_for_attention_modules(self) -> None:
         attention_modules = list(
             filter(
-                lambda module: "PagedAttention" in module.__class__.__name__,
+                lambda module: "Attention" == module.__class__.__name__,
                 self.model_runner.model.modules()))
         for attention_module in attention_modules:
             del attention_module.kvcache_comm_manager

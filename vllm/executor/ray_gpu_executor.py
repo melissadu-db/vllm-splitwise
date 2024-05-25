@@ -84,169 +84,23 @@ class RayGPUExecutor(ExecutorBase):
         Worker = imported_worker.Worker
         return Worker
 
-    # def _init_workers_ray(self, placement_group: "PlacementGroup",
-    #                       **ray_remote_kwargs):
-    #     if self.parallel_config.tensor_parallel_size == 1:
-    #         # For single GPU case, we use a ray worker with constrained memory.
-    #         num_gpus = self.cache_config.gpu_memory_utilization
-    #     else:
-    #         # Otherwise, the ray workers are allocated with a full GPU.
-    #         num_gpus = 1
-
-    #     # The driver dummy worker does not actually use any resources.
-    #     # It holds the resource for the driver worker.
-    #     self.driver_dummy_worker: RayWorkerVllm = None
-    #     # The remaining workers are the actual ray actors.
-    #     self.workers: List[RayWorkerVllm] = []
-
-    #     # Create the workers.
-    #     driver_ip = get_ip()
-    #     print("ray gpuexecutor bundles", placement_group.bundle_specs)
-    #     for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-    #         if not bundle.get("GPU", 0):
-    #             print("skipping")
-    #             continue
-    #         scheduling_strategy = PlacementGroupSchedulingStrategy(
-    #             placement_group=placement_group,
-    #             placement_group_capture_child_tasks=True,
-    #             placement_group_bundle_index=bundle_id,
-    #         )
-    #         worker = ray.remote(
-    #             num_cpus=0,
-    #             num_gpus=num_gpus,
-    #             scheduling_strategy=scheduling_strategy,
-    #             **ray_remote_kwargs,
-    #         )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
-
-    #         worker_ip = ray.get(worker.get_node_ip.remote())
-    #         if worker_ip == driver_ip and self.driver_dummy_worker is None:
-    #             # If the worker is on the same node as the driver, we use it
-    #             # as the resource holder for the driver process.
-    #             self.driver_dummy_worker = worker
-    #         else:
-    #             # Else, added to the list of workers.
-    #             self.workers.append(worker)
-
-    #     print(self.workers)
-    #     if self.driver_dummy_worker is None:
-    #         raise ValueError(
-    #             "Ray does not allocate any GPUs on the driver node. Consider "
-    #             "adjusting the Ray placement group or running the driver on a "
-    #             "GPU node.")
-
-    #     # Get the set of GPU IDs used on each node.
-    #     driver_node_id, driver_gpu_ids = ray.get(
-    #         self.driver_dummy_worker.get_node_and_gpu_ids.remote())
-    #     worker_node_and_gpu_ids = ray.get(
-    #         [worker.get_node_and_gpu_ids.remote() for worker in self.workers])
-        
-    #     driver_node_workers = []
-    #     other_node_workers = []
-    #     driver_worker_node_and_gpu_ids = []
-    #     other_worker_node_and_gpu_ids = []
-    #     for worker, (node_id, gpu_ids) in zip(self.workers,
-    #                                           worker_node_and_gpu_ids):
-    #         if node_id == driver_node_id:
-    #             driver_node_workers.append(worker)
-    #             driver_worker_node_and_gpu_ids.append((node_id, gpu_ids))
-    #         else:
-    #             other_node_workers.append(worker)
-    #             other_worker_node_and_gpu_ids.append((node_id, gpu_ids))
-    #     self.workers = driver_node_workers + other_node_workers
-    #     worker_node_and_gpu_ids = driver_worker_node_and_gpu_ids + other_worker_node_and_gpu_ids
-
-    #     node_workers = defaultdict(list)
-    #     node_gpus = defaultdict(list)
-
-    #     node_workers[driver_node_id].append(0)
-    #     node_gpus[driver_node_id].extend(driver_gpu_ids)
-    #     for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids,
-    #                                            start=1):
-    #         node_workers[node_id].append(i)
-    #         node_gpus[node_id].extend(gpu_ids)
-    #     for node_id, gpu_ids in node_gpus.items():
-    #         node_gpus[node_id] = sorted(gpu_ids)
-
-    #     # Set CUDA_VISIBLE_DEVICES for the driver and workers.
-    #     set_cuda_visible_devices(node_gpus[driver_node_id])
-    #     for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
-    #         worker.set_cuda_visible_devices.remote(node_gpus[node_id])
-
-    #     distributed_init_method = get_distributed_init_method(
-    #         driver_ip, get_open_port())
-    #     mscclpp_init_method = f"eth0:{driver_ip}:{get_open_port()}" if self.parallel_config.sep_prompt_token else None
-
-    #     # Lazy import the Worker to avoid importing torch.cuda/xformers
-    #     # before CUDA_VISIBLE_DEVICES is set in the Worker
-    #     Worker = self._dispatch_worker()
-
-    #     model_config = copy.deepcopy(self.model_config)
-    #     parallel_config = copy.deepcopy(self.parallel_config)
-    #     scheduler_config = copy.deepcopy(self.scheduler_config)
-    #     device_config = copy.deepcopy(self.device_config)
-    #     lora_config = copy.deepcopy(self.lora_config)
-    #     kv_cache_dtype = self.cache_config.cache_dtype
-
-    #     # Initialize the actual workers with the Worker class.
-    #     for rank, (worker, (node_id, _)) in enumerate(
-    #             zip(self.workers, worker_node_and_gpu_ids),
-    #             start=1,
-    #     ):
-    #         local_rank = node_workers[node_id].index(rank)
-    #         worker.init_worker.remote(
-    #             lambda rank=rank, local_rank=local_rank: Worker(
-    #                 model_config,
-    #                 parallel_config,
-    #                 scheduler_config,
-    #                 device_config,
-    #                 local_rank,
-    #                 rank,
-    #                 distributed_init_method,
-    #                 lora_config=lora_config,
-    #                 kv_cache_dtype=kv_cache_dtype,
-    #                 mscclpp_init_method=mscclpp_init_method,
-    #            ))
-
-    #     # Initialize the driver worker with the Worker class.
-    #     driver_rank = 0
-    #     driver_local_rank = node_workers[driver_node_id].index(driver_rank)
-    #     self.driver_worker = Worker(
-    #         self.model_config,
-    #         self.parallel_config,
-    #         self.scheduler_config,
-    #         self.device_config,
-    #         driver_local_rank,
-    #         driver_rank,
-    #         distributed_init_method,
-    #         lora_config=self.lora_config,
-    #         kv_cache_dtype=kv_cache_dtype,
-    #         mscclpp_init_method=mscclpp_init_method,
-    #         is_driver_worker=True,
-    #     )
-
-    #     # FIXME(woosuk): We are not properly initializing cupy NCCL when
-    #     # we have multiple nodes.
-    #     self._run_workers("init_model",
-    #                       cupy_port=get_open_port()
-    #                       if not model_config.enforce_eager else None)
-    #     self._run_workers(
-    #         "load_model",
-    #         max_concurrent_workers=self.parallel_config.
-    #         max_parallel_loading_workers,
-    #     )
-
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         if self.parallel_config.tensor_parallel_size == 1:
+            # For single GPU case, we use a ray worker with constrained memory.
             num_gpus = self.cache_config.gpu_memory_utilization
         else:
+            # Otherwise, the ray workers are allocated with a full GPU.
             num_gpus = 1
 
+        # The driver dummy worker does not actually use any resources.
+        # It holds the resource for the driver worker.
         self.driver_dummy_worker: RayWorkerVllm = None
+        # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerVllm] = []
 
+        # Create the workers.
         driver_ip = get_ip()
-        print("engine bundles", placement_group.bundle_specs)
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 print("skipping")
@@ -269,25 +123,26 @@ class RayGPUExecutor(ExecutorBase):
                 # as the resource holder for the driver process.
                 self.driver_dummy_worker = worker
             else:
+                # Else, added to the list of workers.
                 self.workers.append(worker)
 
-        print("workers", self.workers)
+        print(self.workers)
         if self.driver_dummy_worker is None:
             raise ValueError(
                 "Ray does not allocate any GPUs on the driver node. Consider "
                 "adjusting the Ray placement group or running the driver on a "
                 "GPU node.")
 
+        # Get the set of GPU IDs used on each node.
         driver_node_id, driver_gpu_ids = ray.get(
             self.driver_dummy_worker.get_node_and_gpu_ids.remote())
         worker_node_and_gpu_ids = ray.get(
             [worker.get_node_and_gpu_ids.remote() for worker in self.workers])
-
+        
         driver_node_workers = []
         other_node_workers = []
         driver_worker_node_and_gpu_ids = []
         other_worker_node_and_gpu_ids = []
-
         for worker, (node_id, gpu_ids) in zip(self.workers,
                                               worker_node_and_gpu_ids):
             if node_id == driver_node_id:
@@ -311,7 +166,7 @@ class RayGPUExecutor(ExecutorBase):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        # Set CUDA_VISIBLE_DEVICES for the driver.
+        # Set CUDA_VISIBLE_DEVICES for the driver and workers.
         set_cuda_visible_devices(node_gpus[driver_node_id])
         for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
             worker.set_cuda_visible_devices.remote(node_gpus[node_id])
@@ -322,18 +177,20 @@ class RayGPUExecutor(ExecutorBase):
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
+        Worker = self._dispatch_worker()
 
-        # Initialize torch distributed process group for the workers.
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
+        lora_config = copy.deepcopy(self.lora_config)
+        kv_cache_dtype = self.cache_config.cache_dtype
 
-        for rank, (worker, (node_id,
-                            _)) in enumerate(zip(self.workers,
-                                                 worker_node_and_gpu_ids),
-                                             start=1):
+        # Initialize the actual workers with the Worker class.
+        for rank, (worker, (node_id, _)) in enumerate(
+                zip(self.workers, worker_node_and_gpu_ids),
+                start=1,
+        ):
             local_rank = node_workers[node_id].index(rank)
             worker.init_worker.remote(
                 lambda rank=rank, local_rank=local_rank: Worker(
@@ -344,28 +201,33 @@ class RayGPUExecutor(ExecutorBase):
                     local_rank,
                     rank,
                     distributed_init_method,
-                    lora_config=self.lora_config,
-                    kv_cache_dtype=self.cache_config.cache_dtype,
+                    lora_config=lora_config,
+                    kv_cache_dtype=kv_cache_dtype,
                     mscclpp_init_method=mscclpp_init_method,
-                ))
+               ))
 
+        # Initialize the driver worker with the Worker class.
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = Worker(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
+            self.model_config,
+            self.parallel_config,
+            self.scheduler_config,
+            self.device_config,
             driver_local_rank,
             driver_rank,
             distributed_init_method,
             lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
+            kv_cache_dtype=kv_cache_dtype,
             mscclpp_init_method=mscclpp_init_method,
             is_driver_worker=True,
         )
 
-        self._run_workers("init_model")
+        # FIXME(woosuk): We are not properly initializing cupy NCCL when
+        # we have multiple nodes.
+        self._run_workers("init_model",
+                          cupy_port=get_open_port()
+                          if not model_config.enforce_eager else None)
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
@@ -479,7 +341,7 @@ class RayGPUExecutor(ExecutorBase):
 
     def list_loras(self) -> List[int]:
         return self._run_workers("list_loras")
-    
+
     def _run_workers(
         self,
         method: str,
@@ -487,6 +349,7 @@ class RayGPUExecutor(ExecutorBase):
         driver_args: Optional[List[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
+        use_ray_compiled_dag: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
@@ -495,11 +358,16 @@ class RayGPUExecutor(ExecutorBase):
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        # Start the ray workers first.
-        ray_worker_outputs = [
-            worker.execute_method.remote(method, *args, **kwargs)
-            for worker in self.workers
-        ]
+        if use_ray_compiled_dag:
+            # Right now, compiled DAG can only accept a single
+            # input. TODO(sang): Fix it.
+            output_channels = self.forward_dag.execute(1)
+        else:
+            # Start the ray workers first.
+            ray_worker_outputs = [
+                worker.execute_method.remote(method, *args, **kwargs)
+                for worker in self.workers
+            ]
 
         if driver_args is None:
             driver_args = args
@@ -512,62 +380,20 @@ class RayGPUExecutor(ExecutorBase):
 
         # Get the results of the ray workers.
         if self.workers:
-            ray_worker_outputs = ray.get(ray_worker_outputs)
+            if use_ray_compiled_dag:
+                try:
+                    ray_worker_outputs = [
+                        pickle.loads(chan.begin_read())
+                        for chan in output_channels
+                    ]
+                finally:
+                    # Has to call end_read in order to reuse the DAG.
+                    for chan in output_channels:
+                        chan.end_read()
+            else:
+                ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
-
-    # def _run_workers(
-    #     self,
-    #     method: str,
-    #     *args,
-    #     driver_args: Optional[List[Any]] = None,
-    #     driver_kwargs: Optional[Dict[str, Any]] = None,
-    #     max_concurrent_workers: Optional[int] = None,
-    #     use_ray_compiled_dag: bool = False,
-    #     **kwargs,
-    # ) -> Any:
-    #     """Runs the given method on all workers."""
-
-    #     if max_concurrent_workers:
-    #         raise NotImplementedError(
-    #             "max_concurrent_workers is not supported yet.")
-
-    #     if use_ray_compiled_dag:
-    #         # Right now, compiled DAG can only accept a single
-    #         # input. TODO(sang): Fix it.
-    #         output_channels = self.forward_dag.execute(1)
-    #     else:
-    #         # Start the ray workers first.
-    #         ray_worker_outputs = [
-    #             worker.execute_method.remote(method, *args, **kwargs)
-    #             for worker in self.workers
-    #         ]
-
-    #     if driver_args is None:
-    #         driver_args = args
-    #     if driver_kwargs is None:
-    #         driver_kwargs = kwargs
-
-    #     # Start the driver worker after all the ray workers.
-    #     driver_worker_output = getattr(self.driver_worker,
-    #                                    method)(*driver_args, **driver_kwargs)
-
-    #     # Get the results of the ray workers.
-    #     if self.workers:
-    #         if use_ray_compiled_dag:
-    #             try:
-    #                 ray_worker_outputs = [
-    #                     pickle.loads(chan.begin_read())
-    #                     for chan in output_channels
-    #                 ]
-    #             finally:
-    #                 # Has to call end_read in order to reuse the DAG.
-    #                 for chan in output_channels:
-    #                     chan.end_read()
-    #         else:
-    #             ray_worker_outputs = ray.get(ray_worker_outputs)
-
-    #     return [driver_worker_output] + ray_worker_outputs
 
     def _run_stage_workers(
         self,

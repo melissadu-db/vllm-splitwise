@@ -32,21 +32,17 @@ class XFormersBackend:
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
+        self.kvcache_comm_manager = None
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        suppored_head_sizes = PagedAttentionImpl.get_supported_head_sizes()
-        if head_size not in suppored_head_sizes:
+        supported_head_sizes = PagedAttentionImpl.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
-                f"Supported head sizes are: {suppored_head_sizes}.")
+                f"Supported head sizes are: {supported_head_sizes}.")
 
         self.use_ref_attention = _check_use_ref_attention()
-
-        self.kvcache_comm_manager = None
-
-    def set_kvcache_comm_manager(self, kvcache_comm_manager):
-        self.kvcache_comm_manager = kvcache_comm_manager
 
     def forward(
         self,
@@ -85,13 +81,13 @@ class XFormersBackend:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
                                                  value_cache, input_metadata)
 
-            if input_metadata.is_prompt and len(input_metadata.blocks_to_nw):
+        if input_metadata.is_prompt:
+            if len(input_metadata.blocks_to_nw):
                 assert self.kvcache_comm_manager is not None
                 for semid in input_metadata.blocks_to_nw:
                     for block_start, num_blocks in input_metadata.blocks_to_nw[semid]:
                         self.kvcache_comm_manager.put(semid, self.layer_id, block_start, num_blocks)
 
-        if input_metadata.is_prompt:
             # Prompt run.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):

@@ -56,12 +56,15 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         return self.backend.forward(query, key, value, key_cache, value_cache,
                                     input_metadata)
+    
+    def set_kvcache_comm_manager(self, kvcache_comm_manager):
+        self.backend.kvcache_comm_manager = kvcache_comm_manager
 
 
 @lru_cache(maxsize=1)
 def _use_flash_attn() -> bool:
     try:
-        import flash_attn  # noqa: F401
+        import vllm.model_executor.layers.attention.backends.flash_attn  # noqa: F401
     except ImportError:
         logger.info("flash_attn is not found. Using xformers backend.")
         return False
