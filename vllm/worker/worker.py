@@ -123,6 +123,7 @@ class Worker:
 
     def init_kvcache_comm(self,
                           mscclpp_init_method: Optional[str] = None) -> None:
+        print("INIT METHOD: ", mscclpp_init_method)
         if mscclpp_init_method is not None:
             from vllm.worker.comm_utils import KVCacheCommManager
             self.kvcache_comm_manager = KVCacheCommManager(

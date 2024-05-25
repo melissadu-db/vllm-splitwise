@@ -1,4 +1,5 @@
 import time
+import os
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Type, Union)
 
@@ -107,10 +108,6 @@ class LLMEngine:
         self._init_tokenizer()
         self.seq_counter = Counter()
 
-        self.model_executor = executor_class(model_config, cache_config,
-                                             parallel_config, scheduler_config,
-                                             device_config, lora_config)
-
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
             # Disable Ray usage stats collection.
@@ -128,6 +125,9 @@ class LLMEngine:
             # Setup the MSCCL++ communication required for KV cache transfer
             self._setup_kvcache_comm()
 
+        self.model_executor = executor_class(model_config, cache_config,
+                                             parallel_config, scheduler_config,
+                                             device_config, lora_config)
         # Create the scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config, lora_config,
                                    self.parallel_config.sep_prompt_token)

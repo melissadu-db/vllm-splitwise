@@ -148,7 +148,6 @@ def broadcast_tensor_dict(
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
-    print(ranks)
     assert src in ranks, f"Invalid src rank ({src}), not in {ranks}"
 
     # Bypass the function if we are using only 1 GPU.
