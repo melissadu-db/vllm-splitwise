@@ -82,13 +82,13 @@ class XFormersBackend:
                                                  value_cache, input_metadata)
 
         if input_metadata.is_prompt:
+            # Prompt run.
             if len(input_metadata.blocks_to_nw):
                 assert self.kvcache_comm_manager is not None
                 for semid in input_metadata.blocks_to_nw:
                     for block_start, num_blocks in input_metadata.blocks_to_nw[semid]:
                         self.kvcache_comm_manager.put(semid, self.layer_id, block_start, num_blocks)
 
-            # Prompt run.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
@@ -109,7 +109,6 @@ class XFormersBackend:
                                                   self.num_kv_heads,
                                                   self.num_queries_per_kv,
                                                   value.shape[-1])
-
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.

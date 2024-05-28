@@ -584,8 +584,7 @@ class ModelRunner:
         blocks_to_nw: Dict[int, List[int]] = {},
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
-         lora_requests,
-         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list,
+         lora_requests, lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list,
                                                     blocks_to_nw)
 
         if self.lora_config:
