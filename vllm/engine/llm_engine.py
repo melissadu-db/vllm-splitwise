@@ -1099,4 +1099,6 @@ class LLMEngine:
         if self.workers:
             ray_worker_outputs = ray.get(ray_worker_outputs)
 
+        # return [driver_worker_output]
         return [driver_worker_output] + ray_worker_outputs
+
