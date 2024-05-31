@@ -93,10 +93,10 @@ if __name__ == "__main__":
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    # engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args = EngineArgs.from_cli_args(args)
-    # engine = AsyncLLMEngine.from_engine_args(engine_args)
-    engine = LLM(model="facebook/opt-125m", sep_prompt_token=True, tensor_parallel_size=2)
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    # engine_args = EngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    # engine = LLM(model="facebook/opt-125m", sep_prompt_token=True, tensor_parallel_size=2)
     # engine = LLM(engine_args)
 
     app.root_path = args.root_path

@@ -211,7 +211,8 @@ class _AsyncLLMEngine(LLMEngine):
             output = await self.model_executor.execute_model_async(
                 seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
                 scheduler_outputs.blocks_to_swap_out,
-                scheduler_outputs.blocks_to_copy)
+                scheduler_outputs.blocks_to_copy,
+                scheduler_outputs.blocks_to_nw)
         else:
             output = []
 
@@ -231,7 +232,7 @@ class _AsyncLLMEngine(LLMEngine):
                 prompt=prompt,
                 lora_request=lora_request)
         return prompt_token_ids
-
+    
     async def add_request_async(
         self,
         request_id: str,
@@ -342,7 +343,8 @@ class AsyncLLMEngine:
                      log_requests=not engine_args.disable_log_requests,
                      log_stats=not engine_args.disable_log_stats,
                      max_log_len=engine_args.max_log_len,
-                     start_engine_loop=start_engine_loop)
+                     start_engine_loop=start_engine_loop,
+                     placement_group=None)
         return engine
 
     @property

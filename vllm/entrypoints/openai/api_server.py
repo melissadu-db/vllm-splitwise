@@ -247,10 +247,10 @@ if __name__ == "__main__":
     else:
         served_model = args.model
 
-    # engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args = EngineArgs.from_cli_args(args)
-    # engine = AsyncLLMEngine.from_engine_args(engine_args)
-    engine = LLMEngine.from_engine_args(engine_args)
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    # engine_args = EngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    # engine = LLMEngine.from_engine_args(engine_args)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.lora_modules,

@@ -105,6 +105,7 @@ class LLMEngine:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.log_stats = log_stats
+        self.placement_group = placement_group
         self._verify_args()
 
         self._init_tokenizer()
@@ -122,7 +123,10 @@ class LLMEngine:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
-            self.stat_logger.info("cache_config", self.cache_config)    
+            self.stat_logger.info("cache_config", self.cache_config) 
+
+    def get_tokenizer(self) -> "PreTrainedTokenizer":
+        return self.tokenizer.get_lora_tokenizer()   
 
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
@@ -543,13 +547,15 @@ class LLMEngine:
             for seq_group in scheduled_seq_groups:
                 self.scheduler.mark_blocks_as_computed(seq_group)
 
+        print('start process sequnece group outputs')
         for seq_group, outputs in zip(scheduled_seq_groups, output):
             self._process_sequence_group_outputs(seq_group, outputs)
-
+        print('free finished sequence groups')
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
+        print('create the outputs')
         request_outputs: List[RequestOutput] = []
         for seq_group in scheduled_seq_groups:
             seq_group.maybe_set_first_token_time(now)
@@ -560,6 +566,7 @@ class LLMEngine:
             request_outputs.append(request_output)
 
         # Log stats.
+        print('log stats')
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
 
@@ -626,7 +633,6 @@ class LLMEngine:
                 scheduler_outputs.blocks_to_swap_out,
                 scheduler_outputs.blocks_to_copy,
                 scheduler_outputs.blocks_to_nw)
-
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:

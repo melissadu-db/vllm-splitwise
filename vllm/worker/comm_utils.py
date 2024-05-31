@@ -6,6 +6,7 @@ from vllm.utils import get_total_num_gpus, MAX_SLOT_IDS
 try:
     import mscclpp.comm as mscclpp_comm
     from mscclpp.utils import KernelBuilder, pack
+    from mscclpp import Transport
 except ImportError:
     raise ImportError(
         "MSCCL++ is not installed. Please install MSCCL++ to use this feature."
@@ -90,14 +91,12 @@ class WaitKVKernel:
 class KVCacheCommunicator:
     """ KVCacheCommunicator provides an interface to communicate the KV cache
     between prompt and token workers using MSCCL++ proxy channels.
-
     block_size: int - size of a single KV cache block
     device_handles: dict - device handles of MSCCL++ proxy channels
     flush_counter: int - counter to keep track of number of operations
     memory_ids: dict - memory ids of KV cache on prompt and token workers
     my_rank: int - rank of the prompt worker
     remote_rank: int - rank of the token worker
-
     SendKVKernel and SignalKVKernel put KV cache data and signal semaphores on the prompt side
     WaitKVKernel waits on semaphores on the token side.
     """
@@ -163,8 +162,10 @@ class KVCacheCommManager:
 
         # Setup up connections.
         self.corr_worker_rank = (rank + num_prompt_workers) % world_size
-        transport = mscclpp_comm.Transport.CudaIpc
-        # transport = self.mscclpp_group.my_ib_device(rank % get_total_num_gpus())        
+        # transport = self.mscclpp_group.CudaIpc
+        transport = Transport.CudaIpc
+        # transport = self.mscclpp_group.my_ib_device(rank %
+        #                                             get_total_num_gpus())
         self.mscclpp_conns = self.mscclpp_group.make_connection(
             [self.corr_worker_rank], transport)
 

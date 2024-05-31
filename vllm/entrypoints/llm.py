@@ -165,8 +165,7 @@ class LLM:
             prompt_token_ids)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
-            token_ids = None if prompt_token_ids is None else prompt_token_ids[
-                i]
+            token_ids = None if prompt_token_ids is None else prompt_token_ids[i]
             self._add_request(prompt,
                               sampling_params,
                               token_ids,

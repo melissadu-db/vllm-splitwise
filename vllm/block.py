@@ -57,14 +57,14 @@ class PhysicalTokenBlock:
         device: Device,
         block_number: int,
         block_size: int,
-        block_hash: int,
-        num_hashed_tokens: int,
+        # block_hash: int,
+        # num_hashed_tokens: int,
     ) -> None:
         self.device = device
         self.block_number = block_number
         self.block_size = block_size
-        self.block_hash = block_hash
-        self.num_hashed_tokens = num_hashed_tokens
+        # self.block_hash = block_hash
+        # self.num_hashed_tokens = num_hashed_tokens
 
         self.ref_count = 0
         self.last_accessed = DEFAULT_LAST_ACCESSED_TIME
