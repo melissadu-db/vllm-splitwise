@@ -71,6 +71,13 @@ class SchedulerOutputs:
     @property
     def lora_requests(self) -> Set[LoRARequest]:
         return {g.lora_request for g in self.scheduled_seq_groups}
+    
+    def __str__(self) -> str:
+        return (f"SchedulerOutputs(scheduled_seq_groups={self.scheduled_seq_groups}, "
+                f"prompt_run={self.prompt_run}, num_batched_tokens={self.num_batched_tokens}, "
+                f"blocks_to_swap_in={self.blocks_to_swap_in}, blocks_to_swap_out={self.blocks_to_swap_out}, "
+                f"blocks_to_copy={self.blocks_to_copy}, blocks_to_nw={self.blocks_to_nw}, "
+                f"ignored_seq_groups={self.ignored_seq_groups})")
 
 
 class Scheduler:

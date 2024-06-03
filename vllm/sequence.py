@@ -464,6 +464,11 @@ class SequenceGroupMetadata:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+    
+    def __str__(self) -> str:
+        return (f"SequenceGroupMetadata(request_id={self.request_id}, "
+                f"is_prompt={self.is_prompt}, "
+                f"num_seqs={len(self.seq_data)})")
 
 
 class SequenceOutput:

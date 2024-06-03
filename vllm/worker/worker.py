@@ -100,8 +100,8 @@ class Worker:
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
-            torch.cuda.empty_cache()
-            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+            # torch.cuda.empty_cache()
+            # self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -204,10 +204,14 @@ class Worker:
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
+        peak_memory = total_gpu_memory - free_gpu_memory
+        # peak_memory = self.init_gpu_memory - free_gpu_memory
 
-        cache_block_size = self.get_cache_block_size_bytes(
-            block_size, cache_dtype)
+        # cache_block_size = self.get_cache_block_size_bytes(
+        #   block_size, cache_dtype)
+        cache_block_size = CacheEngine.get_cache_block_size(
+            block_size, cache_dtype, self.model_config, self.parallel_config)
+            
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
             cache_block_size)
@@ -414,35 +418,35 @@ def init_distributed_environment(
             init_method=distributed_init_method,
         )
 
-    if cupy_utils.is_initialized():
-        cupy_world_size = cupy_utils.get_world_size()
-        if cupy_world_size != parallel_config.world_size:
-            raise RuntimeError(
-                "cupy.distributed is already initialized but the cupy world "
-                "size does not match parallel_config.world_size "
-                f"({cupy_world_size} vs. {parallel_config.world_size}).")
-    elif (parallel_config.world_size > 1 and cupy_port is not None):
-        # NOTE(woosuk): We don't initialize CuPy process group when world size
-        # is 1.
-        # TODO(woosuk): Support multi-node connection.
-        cupy_utils.init_process_group(
-            world_size=parallel_config.world_size,
-            rank=rank,
-            host="localhost",
-            port=cupy_port,
-        )
+    # if cupy_utils.is_initialized():
+    #     cupy_world_size = cupy_utils.get_world_size()
+    #     if cupy_world_size != parallel_config.world_size:
+    #         raise RuntimeError(
+    #             "cupy.distributed is already initialized but the cupy world "
+    #             "size does not match parallel_config.world_size "
+    #             f"({cupy_world_size} vs. {parallel_config.world_size}).")
+    # elif (parallel_config.world_size > 1 and cupy_port is not None):
+    #     # NOTE(woosuk): We don't initialize CuPy process group when world size
+    #     # is 1.
+    #     # TODO(woosuk): Support multi-node connection.
+    #     cupy_utils.init_process_group(
+    #         world_size=parallel_config.world_size,
+    #         rank=rank,
+    #         host="localhost",
+    #         port=cupy_port,
+    #     )
 
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if cupy_utils.is_initialized():
-        cupy_utils.all_reduce(torch.zeros(1).cuda())
+    # if cupy_utils.is_initialized():
+    #     cupy_utils.all_reduce(torch.zeros(1).cuda())
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size, 
                                       parallel_config.sep_prompt_token)
 
     # Initialize a custom fast all-reduce implementation.
-    if not parallel_config.disable_custom_all_reduce:
-        init_custom_ar()
+    # if not parallel_config.disable_custom_all_reduce:
+    #     init_custom_ar()
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

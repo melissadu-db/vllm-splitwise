@@ -189,7 +189,6 @@ class RayGPUExecutor(ExecutorBase):
                 start=1,
         ):
             local_rank = node_workers[node_id].index(rank)
-            print("START WORKER INIT", rank)
             worker.init_worker.remote(
                 lambda rank=rank, local_rank=local_rank: Worker(
                     model_config,
@@ -289,7 +288,6 @@ class RayGPUExecutor(ExecutorBase):
                       blocks_to_copy: Dict[int, List[int]],
                       blocks_to_nw: Dict[int, List[int]]) -> SamplerOutput:
 
-        print("START WORKERS")
         if self.parallel_config.sep_prompt_token:
             # TODO: This will only schedule one set of workers at a time and will not be
             # able to take advantage of parallely running prompt and token workers.
@@ -416,22 +414,18 @@ class RayGPUExecutor(ExecutorBase):
             driver_kwargs = kwargs
 
         if prompt_stage:
-            print("WORKER PROMPT")
             # Prompt workers include 1 driver worker and num_prompt_workers-1 ray workers.
             ray_worker_outputs = [
                 worker.execute_method.remote(method, *args, **kwargs)
                 for worker in
                 self.workers[:self.parallel_config.num_prompt_workers - 1]
             ]
-            print("RAY WORKER OUTPUT", ray_worker_outputs)
             # Start the driver worker after all the ray workers.
             driver_worker_output = getattr(self.driver_worker,
                                            method)(*driver_args,
                                                    **driver_kwargs)
-            print("DRIVER WORKER OUTPUT 1", driver_worker_output)
 
         else:
-            print("WORKER DECODE")
             # Token workers use worker[num_prompt_workers-1] as driver worker.
             # Start the ray workers first.
             ray_worker_outputs = [
@@ -439,21 +433,17 @@ class RayGPUExecutor(ExecutorBase):
                 for worker in
                 self.workers[self.parallel_config.num_prompt_workers:]
             ]
-            print("RAY WORKER OUTPUT", ray_worker_outputs)
 
             # Start the token driver worker after all the ray workers.
             driver_worker = self.workers[
                 self.parallel_config.num_prompt_workers - 1]
             driver_worker_output = driver_worker.execute_method.remote(
                 method, *driver_args, **driver_kwargs)
-            print("DRIVER WORKER OUTPUT 0", driver_worker_output)
             driver_worker_output = ray.get(driver_worker_output)
-            print("DRIVER WORKER OUTPUT 1", driver_worker_output)
 
         # Get the results of the ray workers.
         if self.workers:
             ray_worker_outputs = ray.get(ray_worker_outputs)
-        print("RAY WORKER OUTPUTS", ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
 
@@ -538,6 +528,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        blocks_to_nw: Dict[int, List[int]],
     ) -> SamplerOutput:
         all_outputs = await self._run_workers_async(
             "execute_model",
@@ -546,6 +537,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
+                "blocks_to_nw": blocks_to_nw,
             })
 
         # Only the driver worker returns the sampling results.
