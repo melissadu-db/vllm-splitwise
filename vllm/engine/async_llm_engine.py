@@ -368,12 +368,6 @@ class AsyncLLMEngine:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
-    async def get_tokenizer(self) -> "PreTrainedTokenizer":
-        if self.engine_use_ray:
-            return await self.engine.get_tokenizer.remote()
-        else:
-            return self.engine.get_tokenizer()
-
     def start_background_loop(self) -> None:
         """Start the background loop."""
         if self.errored:

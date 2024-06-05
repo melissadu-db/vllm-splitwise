@@ -45,9 +45,9 @@ class OpenAIServingChat(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
         """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
+        # error_check_ret = await self._check_model(request)
+        # if error_check_ret is not None:
+        #     return error_check_ret
 
         try:
             prompt = self.tokenizer.apply_chat_template(

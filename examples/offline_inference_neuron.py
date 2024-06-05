@@ -12,7 +12,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
 llm = LLM(
-    model="openlm-research/open_llama_3b",
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
     max_num_seqs=8,
     # The max_model_len and block_size arguments are required to be same as
     # max sequence length when targeting neuron device.

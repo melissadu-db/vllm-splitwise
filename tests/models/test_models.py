@@ -7,6 +7,7 @@ import pytest
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
     "mistralai/Mistral-7B-v0.1",
     "Deci/DeciLM-7b",
     "tiiuae/falcon-7b",

@@ -142,12 +142,13 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(self, request) -> Optional[ErrorResponse]:
+        valid_models = [self.served_model] + [lora.lora_name for lora in self.lora_requests]
         if request.model == self.served_model:
             return
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return
         return self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
+            message=f"The model `{request.model}` does not exist. Must be in {valid_models}.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
