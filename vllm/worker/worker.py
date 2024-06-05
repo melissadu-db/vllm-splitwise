@@ -172,7 +172,7 @@ class Worker:
                 lambda module: "Attention" == module.__class__.__name__,
                 self.model_runner.model.modules()))
         for attention_module in attention_modules:
-            del attention_module.kvcache_comm_manager
+            del attention_module.backend.kvcache_comm_manager
 
     @torch.inference_mode()
     def profile_num_available_blocks(
@@ -401,6 +401,8 @@ def init_distributed_environment(
     """Initialize the distributed environment."""
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
+        if parallel_config.sep_prompt_token:
+            torch_world_size *= 2
         if torch_world_size != parallel_config.world_size:
             raise RuntimeError(
                 "torch.distributed is already initialized but the torch world "

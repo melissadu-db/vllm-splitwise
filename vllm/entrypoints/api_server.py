@@ -46,8 +46,7 @@ async def generate(request: Request) -> Response:
     request_id = random_uuid()
 
     results_generator = engine.generate(prompt,
-                                        sampling_params,
-                                        prefix_pos=prefix_pos)
+                                        sampling_params)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -93,11 +92,8 @@ if __name__ == "__main__":
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    # engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args = EngineArgs.from_cli_args(args)
-    # engine = AsyncLLMEngine.from_engine_args(engine_args)
-    engine = LLM(model="facebook/opt-125m", sep_prompt_token=True, tensor_parallel_size=2)
-    # engine = LLM(engine_args)
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     app.root_path = args.root_path
     uvicorn.run(app,

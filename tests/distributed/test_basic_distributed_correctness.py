@@ -7,7 +7,7 @@ import torch
 
 MODELS = [
     "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
 ]
 
 
