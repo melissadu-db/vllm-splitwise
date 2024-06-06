@@ -347,6 +347,12 @@ class AsyncLLMEngine:
                      start_engine_loop=start_engine_loop)
         return engine
 
+    async def get_tokenizer(self) -> "PreTrainedTokenizer":
+        if self.engine_use_ray:
+            return await self.engine.get_tokenizer.remote()
+        else:
+            return self.engine.get_tokenizer()
+
     @property
     def is_running(self) -> bool:
         return (self.background_loop is not None

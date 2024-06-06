@@ -509,6 +509,7 @@ class ModelRunner:
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens)
+            logger.debug(f"Metadata and prompt/generated tokens: {seq_group_metadata_list[0]}")
 
             if self.lora_config:
                 flat_lora_index_mapping = [

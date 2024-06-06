@@ -135,9 +135,8 @@ class SequenceData:
 
     def __repr__(self) -> str:
         return (f"SequenceData("
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob})")
+                f"prompt_token_ids={str(self.prompt_token_ids)}, "
+                f"output_token_ids={str(self.output_token_ids)})")
 
 
 class Sequence:
@@ -466,9 +465,8 @@ class SequenceGroupMetadata:
         return self.lora_request.lora_int_id if self.lora_request else 0
     
     def __str__(self) -> str:
-        return (f"SequenceGroupMetadata(request_id={self.request_id}, "
-                f"is_prompt={self.is_prompt}, "
-                f"num_seqs={len(self.seq_data)})")
+        # seq_data = list(self.seq_data.values())[0]
+        return f"SequenceGroupMetadata(is_prompt={self.is_prompt}, num_seqs={len(self.seq_data)}, seq_data={str(self.seq_data.values())})"
 
 
 class SequenceOutput:

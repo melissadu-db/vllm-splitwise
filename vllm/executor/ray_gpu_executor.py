@@ -421,6 +421,7 @@ class RayGPUExecutor(ExecutorBase):
                 self.workers[:self.parallel_config.num_prompt_workers - 1]
             ]
             # Start the driver worker after all the ray workers.
+            logger.debug(f"Prompt driver worker {method}({driver_args} | {driver_kwargs})")
             driver_worker_output = getattr(self.driver_worker,
                                            method)(*driver_args,
                                                    **driver_kwargs)
@@ -437,6 +438,7 @@ class RayGPUExecutor(ExecutorBase):
             # Start the token driver worker after all the ray workers.
             driver_worker = self.workers[
                 self.parallel_config.num_prompt_workers - 1]
+            logger.debug(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
             driver_worker_output = driver_worker.execute_method.remote(
                 method, *driver_args, **driver_kwargs)
             driver_worker_output = ray.get(driver_worker_output)
@@ -495,6 +497,53 @@ class RayGPUExecutor(ExecutorBase):
 
 class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
 
+    async def _run_stage_workers_async(
+        self,
+        method: str,
+        prompt_stage: bool,
+        *args,
+        driver_args: Optional[List[Any]] = None,
+        driver_kwargs: Optional[Dict[str, Any]] = None,
+        max_concurrent_workers: Optional[int] = None,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on prompt workers or token workers."""
+        coros = []
+
+        assert self.parallel_config.sep_prompt_token
+        if max_concurrent_workers:
+            raise NotImplementedError(
+                "max_concurrent_workers is not supported yet.")
+
+        if driver_args is None:
+            driver_args = args
+        if driver_kwargs is None:
+            driver_kwargs = kwargs
+
+        if prompt_stage:
+            # Prompt workers include 1 driver worker and num_prompt_workers-1 ray workers.
+            logger.debug(f"Prompt driver worker {method}({driver_args} | {driver_kwargs})")
+            driver_executor = make_async(getattr(self.driver_worker, method))
+            coros.append(driver_executor(*driver_args, **driver_kwargs))
+
+            for worker in self.workers[:self.parallel_config.num_prompt_workers - 1]:
+                coros.append(worker.execute_method.remote(method, *args, **kwargs))
+    
+        else:
+            driver_worker = self.workers[
+                self.parallel_config.num_prompt_workers - 1]
+            coros.append(driver_worker.execute_method.remote(
+                method, *driver_args, **driver_kwargs))
+            
+            # Token workers use worker[num_prompt_workers-1] as driver worker.
+            for worker in self.workers[self.parallel_config.num_prompt_workers:]:
+                coros.append(worker.execute_method.remote(method, *args, **kwargs))
+
+            logger.debug(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
+
+        all_outputs = await asyncio.gather(*coros)
+        return all_outputs
+
     async def _run_workers_async(
         self,
         method: str,
@@ -530,18 +579,36 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         blocks_to_copy: Dict[int, List[int]],
         blocks_to_nw: Dict[int, List[int]],
     ) -> SamplerOutput:
-        all_outputs = await self._run_workers_async(
-            "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-                "blocks_to_nw": blocks_to_nw,
-            })
+        if self.parallel_config.sep_prompt_token:
+            # TODO: This will only schedule one set of workers at a time and will not be
+            # able to take advantage of parallely running prompt and token workers.
+            all_outputs = await self._run_stage_workers_async(
+                "execute_model",
+                prompt_stage=seq_group_metadata_list[0].is_prompt,
+                driver_kwargs={
+                    "seq_group_metadata_list": seq_group_metadata_list,
+                    "blocks_to_swap_in": blocks_to_swap_in,
+                    "blocks_to_swap_out": blocks_to_swap_out,
+                    "blocks_to_copy": blocks_to_copy,
+                    "blocks_to_nw": blocks_to_nw,
+                })
 
-        # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
+            # Only the driver worker returns the sampling results.
+            output = all_outputs[0]
+        else:
+            # Execute the model.
+            all_outputs = await self._run_workers_async(
+                "execute_model",
+                driver_kwargs={
+                    "seq_group_metadata_list": seq_group_metadata_list,
+                    "blocks_to_swap_in": blocks_to_swap_in,
+                    "blocks_to_swap_out": blocks_to_swap_out,
+                    "blocks_to_copy": blocks_to_copy,
+                    "blocks_to_nw": {},
+                })
+
+            # Only the driver worker returns the sampling results.
+            output = all_outputs[0]
         return output
 
     async def check_health_async(self) -> None:

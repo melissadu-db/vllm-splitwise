@@ -153,13 +153,14 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
+        valid_models = [self.served_model] + [lora.lora_name for lora in self.lora_requests]
         if request.model == self.served_model:
             return
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError("The model `{request.model}` does not exist.")
+        raise ValueError(f"The model {request.model} does not exist. Must be in {valid_models}")
 
     def _validate_prompt_and_tokenize(
             self,
