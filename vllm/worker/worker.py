@@ -329,6 +329,8 @@ class Worker:
             logger.debug("Signaling token worker")
             for sem_id in blocks_to_nw:
                 self.kvcache_comm_manager.signal_and_flush(sem_id)
+                
+        logger.debug("Finished worker model execution.")
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

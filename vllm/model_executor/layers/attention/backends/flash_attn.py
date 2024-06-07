@@ -27,6 +27,7 @@ class FlashAttentionBackend:
         self.sliding_window = sliding_window
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
+        self.kvcache_comm_manager = None
         self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -78,6 +79,12 @@ class FlashAttentionBackend:
                                                  value_cache, input_metadata)
 
         if input_metadata.is_prompt:
+            if len(input_metadata.blocks_to_nw):
+                assert self.kvcache_comm_manager is not None
+                for semid in input_metadata.blocks_to_nw:
+                    for block_start, num_blocks in input_metadata.blocks_to_nw[semid]:
+                        self.kvcache_comm_manager.put(semid, self.layer_id, block_start, num_blocks)
+                        
             # Prompt run.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):

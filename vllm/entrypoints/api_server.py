@@ -46,7 +46,8 @@ async def generate(request: Request) -> Response:
     request_id = random_uuid()
 
     results_generator = engine.generate(prompt,
-                                        sampling_params)
+                                        sampling_params,
+                                        request_id)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:

@@ -122,7 +122,7 @@ def zephyr_lora_files():
 
 @pytest.fixture(scope="session")
 def server(zephyr_lora_files):
-    ray.init()
+    ray.init(ignore_reinit_error=True)
     server_runner = ServerRunner.remote([
         "--model",
         MODEL_NAME,

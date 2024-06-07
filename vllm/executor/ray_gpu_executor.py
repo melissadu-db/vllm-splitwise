@@ -319,6 +319,8 @@ class RayGPUExecutor(ExecutorBase):
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
+        
+        logger.debug("Finish executor model execution.")
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -530,6 +532,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
                 coros.append(worker.execute_method.remote(method, *args, **kwargs))
     
         else:
+            logger.info(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
             driver_worker = self.workers[
                 self.parallel_config.num_prompt_workers - 1]
             coros.append(driver_worker.execute_method.remote(
@@ -538,8 +541,6 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
             # Token workers use worker[num_prompt_workers-1] as driver worker.
             for worker in self.workers[self.parallel_config.num_prompt_workers:]:
                 coros.append(worker.execute_method.remote(method, *args, **kwargs))
-
-            logger.debug(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
 
         all_outputs = await asyncio.gather(*coros)
         return all_outputs
