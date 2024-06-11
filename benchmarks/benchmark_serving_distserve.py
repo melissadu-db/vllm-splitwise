@@ -1,4 +1,6 @@
 """Benchmark online serving throughput.
+
+From DistServe: https://github.com/LLMServe/DistServe/tree/7acac2df6fb25b865ea8dc326c796435e01a5670/evaluation 
 """
 import argparse
 import asyncio
