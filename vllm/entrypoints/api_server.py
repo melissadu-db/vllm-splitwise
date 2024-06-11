@@ -8,6 +8,7 @@ change `vllm/entrypoints/openai/api_server.py` instead.
 
 import argparse
 import json
+import time
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
@@ -62,27 +63,33 @@ async def generate(request: Request) -> Response:
     if stream:
         return StreamingResponse(stream_results())
 
-    # Non-streaming case
+    # Non-streaming case    
     final_output = None
-    # async for request_output in results_generator:
-    for request_output in results_generator:
+    timestamps = []
+    async for request_output in results_generator:
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await engine.abort(request_id)
             return Response(status_code=499)
         final_output = request_output
+        timestamps.append(time.perf_counter())
 
     assert final_output is not None
+    # request_events = engine.get_and_pop_request_lifetime_events(request_id)
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
-    ret = {"text": text_outputs}
+    ret = {
+        "text": text_outputs,
+        "timestamps": timestamps,
+        # "lifetime_events": json_encode_lifetime_events(request_events)
+        }
     return JSONResponse(ret)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
     parser.add_argument(

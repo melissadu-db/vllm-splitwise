@@ -15,8 +15,8 @@ import aiohttp
 import numpy as np
 from tqdm import tqdm
 
-from benchmarks.benchmark_splitwise_utils import TestRequest, Dataset, RequestResult
-from benchmarks.benchmark_splitwise_utils import BACKEND_TO_PORTS
+from benchmark_utils import TestRequest, Dataset, RequestResult
+from benchmark_utils import BACKEND_TO_PORTS
 
 pbar: Optional[tqdm] = None
 

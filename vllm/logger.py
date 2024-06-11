@@ -30,7 +30,7 @@ _default_handler = None
 
 
 def _setup_logger():
-    _root_logger.setLevel(logging.DEBUG)
+    _root_logger.setLevel(logging.INFO)
     global _default_handler
     if _default_handler is None:
         _default_handler = logging.StreamHandler(sys.stdout)

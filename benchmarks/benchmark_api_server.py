@@ -7,7 +7,7 @@ import subprocess
 import argparse
 import multiprocessing
 
-from benchmark_splitwise_utils import BACKEND_TO_PORTS
+from benchmark_utils import BACKEND_TO_PORTS
 
 os.environ["HF_TOKEN"] = "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"
 

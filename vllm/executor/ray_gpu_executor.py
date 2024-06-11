@@ -423,7 +423,7 @@ class RayGPUExecutor(ExecutorBase):
                 self.workers[:self.parallel_config.num_prompt_workers - 1]
             ]
             # Start the driver worker after all the ray workers.
-            logger.debug(f"Prompt driver worker {method}({driver_args} | {driver_kwargs})")
+            # logger.debug(f"Prompt driver worker {method}({driver_args} | {driver_kwargs})")
             driver_worker_output = getattr(self.driver_worker,
                                            method)(*driver_args,
                                                    **driver_kwargs)
@@ -440,7 +440,7 @@ class RayGPUExecutor(ExecutorBase):
             # Start the token driver worker after all the ray workers.
             driver_worker = self.workers[
                 self.parallel_config.num_prompt_workers - 1]
-            logger.debug(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
+            # logger.debug(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
             driver_worker_output = driver_worker.execute_method.remote(
                 method, *driver_args, **driver_kwargs)
             driver_worker_output = ray.get(driver_worker_output)
@@ -524,7 +524,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
 
         if prompt_stage:
             # Prompt workers include 1 driver worker and num_prompt_workers-1 ray workers.
-            logger.debug(f"Prompt driver worker {method}({driver_args} | {driver_kwargs})")
+            # logger.debug(f"Prompt driver worker {method}({driver_args} | {driver_kwargs})")
             driver_executor = make_async(getattr(self.driver_worker, method))
             coros.append(driver_executor(*driver_args, **driver_kwargs))
 
@@ -532,7 +532,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
                 coros.append(worker.execute_method.remote(method, *args, **kwargs))
     
         else:
-            logger.info(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
+            # logger.debug(f"Decode driver worker {method}({driver_args} | {driver_kwargs})")
             driver_worker = self.workers[
                 self.parallel_config.num_prompt_workers - 1]
             coros.append(driver_worker.execute_method.remote(
