@@ -83,8 +83,8 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
 
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
-        # if self.device_config.is_neuron:
-        #     self.model_config.enforce_eager = True
+        if self.device_config.is_neuron:
+            self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
         with measure_cuda_memory() as m:
@@ -490,6 +490,7 @@ class ModelRunner:
         blocks_to_nw: Optional[Dict[int, List[int]]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
+        stage_group = get_stage_parallel_group()
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
@@ -508,6 +509,7 @@ class ModelRunner:
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens)
+            logger.debug(f"First request: {seq_group_metadata_list[0]}")
 
             if self.lora_config:
                 flat_lora_index_mapping = [
@@ -539,10 +541,12 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
+            logger.debug(f"Broadcasting metadata from {self.driver_rank}")
             broadcast_tensor_dict(metadata_dict,
                                   src=self.driver_rank,
                                   group=stage_group)
         else:
+            logger.debug(f"Receiving metadata from {self.driver_rank}")
             metadata_dict = broadcast_tensor_dict(src=self.driver_rank,
                                                   group=stage_group)
             input_tokens = metadata_dict["input_tokens"]
@@ -582,10 +586,11 @@ class ModelRunner:
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         blocks_to_nw: Dict[int, List[int]] = {},
     ) -> Optional[SamplerOutput]:
+        logger.debug("Start preparing input tensors.")
         (input_tokens, input_positions, input_metadata, sampling_metadata,
-         lora_requests,
-         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list,
+         lora_requests, lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list,
                                                     blocks_to_nw)
+        logger.debug("Prepared input tensors, starting model execution.")
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -604,10 +609,12 @@ class ModelRunner:
         )
 
         # Sample the next token.
+        logger.debug(f"Start sampling")
         output = self.model.sample(
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
         )
+        logger.debug(f"Finished model runner model execution.")
         return output
 
     @torch.inference_mode()

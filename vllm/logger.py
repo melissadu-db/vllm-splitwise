@@ -5,6 +5,8 @@ import logging
 import sys
 import os
 
+VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
@@ -28,12 +30,14 @@ _default_handler = None
 
 
 def _setup_logger():
-    _root_logger.setLevel(logging.DEBUG)
+    _root_logger.setLevel(logging.INFO)
     global _default_handler
     if _default_handler is None:
         _default_handler = logging.StreamHandler(sys.stdout)
         _default_handler.flush = sys.stdout.flush  # type: ignore
-        _default_handler.setLevel(logging.INFO)
+        # _default_handler.setLevel(logging.DEBUG) allows all messages to be logged. 
+        # _default_handler.setLevel(logging.INFO) ignores debug messages.
+        _default_handler.setLevel(logging.INFO) 
         _root_logger.addHandler(_default_handler)
     fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
     _default_handler.setFormatter(fmt)
@@ -45,13 +49,15 @@ def _setup_logger():
 # The logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
-_setup_logger()
+if VLLM_CONFIGURE_LOGGING:
+    _setup_logger()
 
 
 def init_logger(name: str):
     # Use the same settings as above for root logger
     logger = logging.getLogger(name)
     logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
-    logger.addHandler(_default_handler)
-    logger.propagate = False
+    if VLLM_CONFIGURE_LOGGING:
+        logger.addHandler(_default_handler)
+        logger.propagate = False
     return logger

@@ -4,6 +4,7 @@ import socket
 import subprocess
 import uuid
 import gc
+import gc
 from platform import uname
 from typing import Dict, List, Tuple, Union
 from packaging.version import parse, Version
@@ -172,12 +173,24 @@ def is_neuron() -> bool:
     return transformers_neuronx is not None
 
 
+def is_neuron() -> bool:
+    try:
+        import transformers_neuronx
+    except ImportError:
+        transformers_neuronx = None
+    return transformers_neuronx is not None
+
+
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
+    max_shared_mem = (
+        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
+    # will fail
     max_shared_mem = (
         cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
@@ -218,7 +231,16 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 def get_ip() -> str:
     # try ipv4
+    # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    except OSError:
+        # try ipv6
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.connect(("dns.google", 80))
+        return s.getsockname()[0]
     try:
         s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
@@ -234,6 +256,16 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 
 
 def get_open_port() -> int:
+    # try ipv4
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
+    except OSError:
+        # try ipv6
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -261,6 +293,13 @@ def get_nvcc_cuda_version() -> Optional[Version]:
             logger.warning(
                 f'Not found nvcc in {cuda_home}. Skip cuda version check!')
             return None
+        if os.path.isfile(cuda_home + '/bin/nvcc'):
+            logger.info(f'CUDA_HOME is not found in the environment. '
+                        f'Using {cuda_home} as CUDA_HOME.')
+        else:
+            logger.warning(
+                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            return None
     nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
     output = nvcc_output.split()
@@ -277,6 +316,7 @@ def _generate_random_fp8_e5m2(
     # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
     # it may occur Inf or NaN if we directly use torch.randint
     # to generate random data for fp8 data.
+    # For example, s.11111.00 in fp8e5m2 format represents Inf.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
     #-----|-------------|-------------------
@@ -387,7 +427,6 @@ def coalesce_blocks_by_id(blocks_to_nw_dict: Dict[int, List[int]]):
 
 def validate_prompt_tokens(prompt_token_ids) -> List[int]:
         # Convert a single prompt token IDs to a list.
-    print("INPUT: ", prompt_token_ids)
     # if isinstance(prompt_token_ids, int):
     #     prompt_token_ids = [prompt_token_ids]
     # elif isinstance(prompt_token_ids, str):

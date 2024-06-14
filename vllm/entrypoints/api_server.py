@@ -1,5 +1,14 @@
+"""
+NOTE: This API server is used only for demonstrating usage of AsyncEngine
+and simple performance benchmarks. It is not intended for production use.
+For production use, we recommend using our OpenAI compatible server.
+We are also not going to accept PRs modifying this file, please
+change `vllm/entrypoints/openai/api_server.py` instead.
+"""
+
 import argparse
 import json
+import time
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
@@ -33,14 +42,13 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
-    prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
     results_generator = engine.generate(prompt,
                                         sampling_params,
-                                        prefix_pos=prefix_pos)
+                                        request_id)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -55,27 +63,33 @@ async def generate(request: Request) -> Response:
     if stream:
         return StreamingResponse(stream_results())
 
-    # Non-streaming case
+    # Non-streaming case    
     final_output = None
-    # async for request_output in results_generator:
-    for request_output in results_generator:
+    timestamps = []
+    async for request_output in results_generator:
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await engine.abort(request_id)
             return Response(status_code=499)
         final_output = request_output
+        timestamps.append(time.perf_counter())
 
     assert final_output is not None
+    # request_events = engine.get_and_pop_request_lifetime_events(request_id)
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
-    ret = {"text": text_outputs}
+    ret = {
+        "text": text_outputs,
+        "timestamps": timestamps,
+        # "lifetime_events": json_encode_lifetime_events(request_events)
+        }
     return JSONResponse(ret)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
     parser.add_argument(
@@ -86,11 +100,8 @@ if __name__ == "__main__":
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    # engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args = EngineArgs.from_cli_args(args)
-    # engine = AsyncLLMEngine.from_engine_args(engine_args)
-    engine = LLM(model="facebook/opt-125m", sep_prompt_token=True, tensor_parallel_size=2)
-    # engine = LLM(engine_args)
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     app.root_path = args.root_path
     uvicorn.run(app,

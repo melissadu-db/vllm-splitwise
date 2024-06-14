@@ -4,9 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
-
 import torch
-
 from vllm.model_executor.parallel_utils import cupy_utils
 
 # Tensor model parallel group that the current rank belongs to.

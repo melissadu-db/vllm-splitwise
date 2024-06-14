@@ -1,6 +1,6 @@
 """Test the KV cache communication operators.
 
-Run `python test_kvcache_comm.py`.
+Run `python tests/distributed/test_kvcache_comm.py`.
 """
 import argparse
 import ray
@@ -18,9 +18,9 @@ def run_all_workers(engine: LLMEngine, method: str, *args):
     """Run all the workers."""
     ray_worker_outputs = [
         worker.execute_method.remote(method, *args)
-        for worker in engine.workers
+        for worker in engine.model_executor.workers
     ]
-    _ = getattr(engine.driver_worker, method)(*args)
+    _ = getattr(engine.model_executor.driver_worker, method)(*args)
     ray.get(ray_worker_outputs)
 
 
@@ -30,7 +30,7 @@ if __name__ == '__main__':
         description='Demo on using the LLMEngine class directly')
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-    args.model = "meta-llama/Llama-2-70b-hf"
+    args.model = "meta-llama/Meta-Llama-3-8B-Instruct"
     args.tensor_parallel_size = 2
     args.sep_prompt_token = True
     engine = initialize_engine(args)
@@ -39,4 +39,4 @@ if __name__ == '__main__':
     run_all_workers(engine, "send_recv_kvcache_all")
     run_all_workers(engine, "check_gpucache")
 
-    engine.destroy_kvcache_comm()
+    engine.model_executor.destroy_kvcache_comm()

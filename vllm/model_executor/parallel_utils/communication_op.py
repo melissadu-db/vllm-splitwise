@@ -5,8 +5,8 @@ import torch
 from torch.distributed import ProcessGroup
 
 from vllm.model_executor.parallel_utils import cupy_utils
+from vllm.logger import init_logger
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
     is_cupy_nccl_enabled_for_all_reduce,
@@ -14,6 +14,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.custom_all_reduce import (
     custom_all_reduce)
 
+logger = init_logger(__name__)
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group.
@@ -75,7 +76,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
                                  dim: int = -1) -> torch.Tensor:
     """Gather the input tensor across model parallel group.
 
-    NOTE: We assume that the input tensor is on the same device across
+    NOTE: We assume that the input tensor is same shape across
     all the ranks.
     """
     world_size = get_tensor_model_parallel_world_size()
@@ -149,8 +150,7 @@ def broadcast_tensor_dict(
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
-    assert src in ranks, f"Invalid src rank ({src})"
-
+    assert src in ranks, f"Invalid src rank ({src}), not in {ranks}"
     # Bypass the function if we are using only 1 GPU.
     world_size = torch.distributed.get_world_size(group=group)
     if world_size == 1:
@@ -171,6 +171,7 @@ def broadcast_tensor_dict(
                     (key, TensorMetadata(value.dtype, value.size())))
             else:
                 metadata_list.append((key, value))
+        logger.debug(f"Starting torch broadcast for {metadata_list}")
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
                                                 group=group)

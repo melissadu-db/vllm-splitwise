@@ -6,10 +6,8 @@ from vllm.block import BlockTable
 class Prefix:
     """Data and states associated with a prefix of prompt tokens for multiple
     sequence groups.
-
     NOTE: This feature is experimental and may be replaced with automatic
         prefix caching in the future.
-
     Args:
         token_ids: The token ids of the prefix.
         block_size: The block size of the executed model.
@@ -50,13 +48,10 @@ class Prefix:
 
 class PrefixPool:
     """Manages all the prompt prefixes.
-
     NOTE: This feature is experimental and may be replaced with automatic
         prefix caching in the future.
-
     Args:
         block_size: The block size of the executed model.
-
     Attributes:
         prefixes: A list of all the prefixes.
         block_size: The block size of the executed model.
