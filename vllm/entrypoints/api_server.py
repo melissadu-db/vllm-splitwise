@@ -4,6 +4,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+import time
 import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -55,20 +56,26 @@ async def generate(request: Request) -> Response:
     if stream:
         return StreamingResponse(stream_results())
 
-    # Non-streaming case
+    # Non-streaming case    
     final_output = None
-    # async for request_output in results_generator:
+    timestamps = []
     for request_output in results_generator:
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await engine.abort(request_id)
             return Response(status_code=499)
         final_output = request_output
+        timestamps.append(time.perf_counter())
 
     assert final_output is not None
+    # request_events = engine.get_and_pop_request_lifetime_events(request_id)
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
-    ret = {"text": text_outputs}
+    ret = {
+        "text": text_outputs,
+        "timestamps": timestamps,
+        # "lifetime_events": json_encode_lifetime_events(request_events)
+        }
     return JSONResponse(ret)
 
 
