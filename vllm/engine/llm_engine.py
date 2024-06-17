@@ -619,18 +619,42 @@ class LLMEngine:
             >>>     if not (engine.has_unfinished_requests() or example_inputs):
             >>>         break
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
-
-        if scheduler_outputs.is_empty():
-            output = []
+        # seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        prompt_seq_group_metadata_list, decode_seq_group_metadata_list, prompt_schedule_outputs, decode_schedule_outputs = self.scheduler.schedule()        
+        if prompt_seq_group_metadata_list:
+            prompt_output = self.model_executor.execute_model(
+                prompt_seq_group_metadata_list, prompt_schedule_outputs.blocks_to_swap_in,
+                prompt_schedule_outputs.blocks_to_swap_out,
+                prompt_schedule_outputs.blocks_to_copy, prompt_schedule_outputs.blocks_to_nw)
         else:
-            output = self.model_executor.execute_model(
-                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
-                scheduler_outputs.blocks_to_swap_out,
-                scheduler_outputs.blocks_to_copy,
-                scheduler_outputs.blocks_to_nw)
+            prompt_output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        if decode_seq_group_metadata_list:
+            decode_output = self.model_executor.execute_model(
+                decode_seq_group_metadata_list, decode_schedule_outputs.blocks_to_swap_in,
+                decode_schedule_outputs.blocks_to_swap_out,
+                decode_schedule_outputs.blocks_to_copy, decode_schedule_outputs.blocks_to_nw)
+        else:
+            decode_output = []
+
+        processed_prompt_outputs = []
+        processed_decode_outputs = []
+        if prompt_output:
+            processed_prompt_outputs = self._process_model_outputs(prompt_output, prompt_schedule_outputs)
+        if decode_output:
+            processed_decode_outputs = self._process_model_outputs(decode_output, decode_schedule_outputs)
+        return processed_prompt_outputs + processed_decode_outputs
+
+        # if scheduler_outputs.is_empty():
+        #     output = []
+        # else:
+        #     output = self.model_executor.execute_model(
+        #         seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
+        #         scheduler_outputs.blocks_to_swap_out,
+        #         scheduler_outputs.blocks_to_copy,
+        #         scheduler_outputs.blocks_to_nw)
+
+        # return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
         """Forced log when no requests active."""

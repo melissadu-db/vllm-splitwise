@@ -204,18 +204,31 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()        
-
-        if not scheduler_outputs.is_empty():
+        prompt_seq_group_metadata_list, decode_seq_group_metadata_list, prompt_schedule_outputs, decode_schedule_outputs = self.scheduler.schedule()        
+        if prompt_seq_group_metadata_list:
             # Execute the model.
-            output = await self.model_executor.execute_model_async(
-                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
-                scheduler_outputs.blocks_to_swap_out,
-                scheduler_outputs.blocks_to_copy, scheduler_outputs.blocks_to_nw)
+            prompt_output = await self.model_executor.execute_model_async(
+                prompt_seq_group_metadata_list, prompt_schedule_outputs.blocks_to_swap_in,
+                prompt_schedule_outputs.blocks_to_swap_out,
+                prompt_schedule_outputs.blocks_to_copy, prompt_schedule_outputs.blocks_to_nw)
         else:
-            output = []
+            prompt_output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        if decode_seq_group_metadata_list:
+            decode_output = await self.model_executor.execute_model_async(
+                decode_seq_group_metadata_list, decode_schedule_outputs.blocks_to_swap_in,
+                decode_schedule_outputs.blocks_to_swap_out,
+                decode_schedule_outputs.blocks_to_copy, decode_schedule_outputs.blocks_to_nw)
+        else:
+            decode_output = []
+
+        processed_prompt_outputs = []
+        processed_decode_outputs = []
+        if prompt_output:
+            processed_prompt_outputs = self._process_model_outputs(prompt_output, prompt_schedule_outputs)
+        if decode_output:
+            processed_decode_outputs = self._process_model_outputs(decode_output, decode_schedule_outputs)
+        return processed_prompt_outputs + processed_decode_outputs
 
     async def encode_request_async(
         self,
