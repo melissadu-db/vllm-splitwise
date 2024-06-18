@@ -9,6 +9,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
+import asyncio
 
 
 class LLM:
@@ -33,6 +34,7 @@ class LLM:
             downloading the model and tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
+        sep_prompt_token: Whether to disaggregate prefill and decode.
         dtype: The data type for the model weights and activations. Currently,
             we support `float32`, `float16`, and `bfloat16`. If `auto`, we use
             the `torch_dtype` attribute specified in the model config file.
@@ -74,6 +76,7 @@ class LLM:
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
+        sep_prompt_token: bool = False,
         dtype: str = "auto",
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
@@ -94,6 +97,7 @@ class LLM:
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
+            sep_prompt_token=sep_prompt_token,
             dtype=dtype,
             quantization=quantization,
             revision=revision,
@@ -107,10 +111,10 @@ class LLM:
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
+        self.sep_prompt_token = sep_prompt_token
         self.request_counter = Counter()
 
-    def get_tokenizer(
-            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    def get_tokenizer(self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer.tokenizer
 
     def set_tokenizer(
@@ -152,8 +156,7 @@ class LLM:
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
-        if (prompts is not None and prompt_token_ids is not None
-                and len(prompts) != len(prompt_token_ids)):
+        if (prompts is not None and prompt_token_ids is not None and len(prompts) != len(prompt_token_ids)):
             raise ValueError("The lengths of prompts and prompt_token_ids "
                              "must be the same.")
         if sampling_params is None:
@@ -161,17 +164,16 @@ class LLM:
             sampling_params = SamplingParams()
 
         # Add requests to the engine.
-        num_requests = len(prompts) if prompts is not None else len(
-            prompt_token_ids)
+        num_requests = len(prompts) if prompts is not None else len(prompt_token_ids)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
-            token_ids = None if prompt_token_ids is None else prompt_token_ids[
-                i]
-            self._add_request(prompt,
-                              sampling_params,
-                              token_ids,
-                              lora_request=lora_request)
-        return self._run_engine(use_tqdm)
+            token_ids = None if prompt_token_ids is None else prompt_token_ids[i]
+            self._add_request(prompt, sampling_params, token_ids, lora_request=lora_request)
+
+        if self.sep_prompt_token:
+            return self._run_engines(use_tqdm)
+        else:
+            return self._run_engine(use_tqdm)
 
     def _add_request(
         self,
@@ -181,19 +183,13 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(request_id,
-                                    prompt,
-                                    sampling_params,
-                                    prompt_token_ids,
-                                    lora_request=lora_request)
+        self.llm_engine.add_request(request_id, prompt, sampling_params, prompt_token_ids, lora_request=lora_request)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests,
-                        desc="Processed prompts",
-                        dynamic_ncols=True)
+            pbar = tqdm(total=num_requests, desc="Processed prompts", dynamic_ncols=True)
         # Run the engine.
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
@@ -210,3 +206,32 @@ class LLM:
         # its previous requests.
         outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs
+
+    def _run_engines(self, use_tqdm: bool) -> List[RequestOutput]:
+        # Initialize tqdm.
+        if use_tqdm:
+            num_requests = self.llm_engine.get_num_unfinished_requests()
+            pbar = tqdm(total=num_requests, desc="Processed prompts")
+
+        # # Add requests to the engine.
+        # async def deal_with_request_coroutine(req_index: int) -> List[RequestOutput]:
+        #     prompt = prompts[req_index] if prompts is not None else None
+        #     token_ids = None if prompt_token_ids is None else prompt_token_ids[req_index]
+        #     step_outputs = []
+        #     async for step_output in self.engine.generate(prompt, token_ids, sampling_params[req_index]):
+        #         step_outputs.append(step_output)
+        #     return step_outputs
+
+        async def generate_main() -> List[List[RequestOutput]]:
+            request_tasks = []
+            # for i in range(num_requests):
+            #     request_tasks.append(asyncio.create_task(deal_with_request_coroutine(i)))
+            event_loop_task = asyncio.create_task(self.llm_engine.start_all_event_loops())
+            result = await asyncio.gather(*request_tasks)
+            event_loop_task.cancel()
+            return result
+
+        if use_tqdm:
+            pbar.close()
+
+        return asyncio.run(generate_main())

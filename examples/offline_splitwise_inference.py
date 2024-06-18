@@ -13,15 +13,13 @@ assert torch.cuda.device_count() >= 2, "Need at least 2 GPUs to run this example
 
 # Sample prompts.
 prompts = [
-    "Life blooms like a flower. Far away or by the road. Waiting",
-    "A quick brown fox",
-    "Artificial intelligence is",
-    "To be or not to be,",
-    "one two three four"
+    "Life blooms like a flower. Far away or by the road. Waiting", "A quick brown fox", "Artificial intelligence is",
+    "To be or not to be,", "one two three four"
 ]
 
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0)
+
 
 async def generate_and_process(engine, prompt, sampling_params, request_id):
     async for output in engine.generate(prompt, sampling_params, request_id):
@@ -30,6 +28,7 @@ async def generate_and_process(engine, prompt, sampling_params, request_id):
     text_outputs = [prompt + output.text for output in final_output.outputs]
     print(f"Prompt: {prompt!r}, Generated text: {text_outputs!r}")
     return text_outputs
+
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -50,5 +49,6 @@ async def main():
 
     # Wait for all tasks to complete.
     await asyncio.gather(*tasks)
+
 
 asyncio.run(main())

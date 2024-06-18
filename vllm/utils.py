@@ -1,4 +1,5 @@
 import enum
+import json
 import os
 import socket
 import subprocess
@@ -149,8 +150,7 @@ class SeqToSlotMapper:
         try:
             slot_id = self.available_slotids.pop(0)
         except IndexError:
-            raise RuntimeError(
-                "No more slots available. Increase MAX_SLOT_IDS.")
+            raise RuntimeError("No more slots available. Increase MAX_SLOT_IDS.")
         self.seq_to_slot[seq_id] = slot_id
 
     def free_seq(self, seq_id):
@@ -187,12 +187,10 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
-    max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    max_shared_mem = (cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
-    max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    max_shared_mem = (cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
@@ -290,18 +288,15 @@ def get_nvcc_cuda_version() -> Optional[Version]:
             logger.info(f'CUDA_HOME is not found in the environment. '
                         f'Using {cuda_home} as CUDA_HOME.')
         else:
-            logger.warning(
-                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            logger.warning(f'Not found nvcc in {cuda_home}. Skip cuda version check!')
             return None
         if os.path.isfile(cuda_home + '/bin/nvcc'):
             logger.info(f'CUDA_HOME is not found in the environment. '
                         f'Using {cuda_home} as CUDA_HOME.')
         else:
-            logger.warning(
-                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            logger.warning(f'Not found nvcc in {cuda_home}. Skip cuda version check!')
             return None
-    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
+    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"], universal_newlines=True)
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
@@ -368,33 +363,28 @@ def create_kv_caches_with_random(
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
     key_caches = []
     for _ in range(num_layers):
-        key_cache = torch.empty(size=key_cache_shape,
-                                dtype=torch_dtype,
-                                device=device)
+        key_cache = torch.empty(size=key_cache_shape, dtype=torch_dtype, device=device)
         if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(key_cache, -scale, scale)
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             key_cache.uniform_(-scale, scale)
         else:
-            raise ValueError(
-                f"Does not support key cache of type {cache_dtype}")
+            raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
     value_caches = []
     for _ in range(num_layers):
-        value_cache = torch.empty(size=value_cache_shape,
-                                  dtype=torch_dtype,
-                                  device=device)
+        value_cache = torch.empty(size=value_cache_shape, dtype=torch_dtype, device=device)
         if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(value_cache, -scale, scale)
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             value_cache.uniform_(-scale, scale)
         else:
-            raise ValueError(
-                f"Does not support value cache of type {cache_dtype}")
+            raise ValueError(f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches
+
 
 def get_total_num_gpus() -> int:
     return len(GPUtil.getGPUs())
@@ -425,13 +415,15 @@ def coalesce_blocks_by_id(blocks_to_nw_dict: Dict[int, List[int]]):
         blocks_to_nw_dict[cur_id] = coalesce_blocks(blocks_to_nw_dict[cur_id])
     return blocks_to_nw_dict
 
+
 def validate_prompt_tokens(prompt_token_ids) -> List[int]:
-        # Convert a single prompt token IDs to a list.
+    # Convert a single prompt token IDs to a list.
     # if isinstance(prompt_token_ids, int):
     #     prompt_token_ids = [prompt_token_ids]
     # elif isinstance(prompt_token_ids, str):
     #     prompt_token_ids = [int(prompt_token_ids, 16)]
     return prompt_token_ids
+
 
 class measure_cuda_memory:
 
@@ -455,3 +447,71 @@ class measure_cuda_memory:
 
         # Force garbage collection
         gc.collect()
+
+
+"""
+A request's lifetime looks like this:
+
+Issued
+|
+| Context Queuing
+|
+Context Begin
+|
+| Context-ing
+|
+Context End
+|
+| Waiting in the bridge queue
+|
+Migration Begin
+|
+| Migrating
+|
+Migration End
+|
+| Decoding Queuing
+|
+Decoding Begin
+|
+| Decoding
+|
+Decoding End
+"""
+
+
+class LifetimeEventType(enum.Enum):
+    """
+    The type of an event in a request's lifetime
+    """
+    Issued = "issued"
+    ContextBegin = "context_begin"
+    ContextEnd = "context_end"
+    MigrationBegin = "migration_begin"
+    MigrationEnd = "migration_end"
+    DecodingBegin = "decoding_begin"
+    DecodingEnd = "decoding_end"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class LifetimeEvent(json.JSONEncoder):
+    """
+    An event in a request's lifetime
+    Contains a timestamp and a type
+    """
+
+    def __init__(self, event_type: LifetimeEventType, timestamp: float = None):
+        if timestamp is None:
+            timestamp = time.time()
+        self.event_type = event_type
+        self.timestamp = timestamp
+
+
+class Stage(enum.Enum):
+    CONTEXT = "context"
+    DECODING = "decoding"
+
+    def __str__(self) -> str:
+        return self.value
