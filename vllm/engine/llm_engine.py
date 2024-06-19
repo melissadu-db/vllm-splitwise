@@ -127,7 +127,7 @@ class LLMEngine:
                 scheduler_config,
                 placement_group,
                 model_executor,
-                # self._on_new_step_output_callback,
+                self._on_new_step_output_callback,
                 # self._on_new_lifetime_event_callback
             )
 
@@ -141,7 +141,7 @@ class LLMEngine:
                 placement_group,
                 model_executor,
                 # self.prefill_engine.clear_migrated_blocks_callback,
-                # self._on_new_step_output_callback,
+                self._on_new_step_output_callback,
                 # self._on_new_lifetime_event_callback
             )
 
@@ -627,25 +627,25 @@ class LLMEngine:
         This function is intended to be used as an async generator, i.e., it can be
         used in a for loop. For example, `async for output in engine.generate(...)`
         """
-        assert self.engine_initialized, "Engine not initialized. Please call engine.initialize() before generating."
-        req = create_request(
-            prompt,
-            prompt_token_ids,
-            sampling_params,
-            self.request_counter,
-            self.tokenizer,
-            arrival_time,
-            request_id,
-        )
-        self.request_outputs[req.request_id] = asyncio.Queue()
-        self.request_lifetime_events[req.request_id] = []
+        # assert self.engine_initialized, "Engine not initialized. Please call engine.initialize() before generating."
+        # req = create_request(
+        #     prompt,
+        #     prompt_token_ids,
+        #     sampling_params,
+        #     self.request_counter,
+        #     self.tokenizer,
+        #     arrival_time,
+        #     request_id,
+        # )
+        self.request_outputs[request_id] = asyncio.Queue()
+        self.request_lifetime_events[request_id] = []
 
-        self._on_new_lifetime_event_callback(req.request_id, LifetimeEvent(LifetimeEventType.Issued))
-        self.prefill_engine.add_request(req)
+        # self._on_new_lifetime_event_callback(req.request_id, LifetimeEvent(LifetimeEventType.Issued))
+        self.add_request(request_id, prompt, sampling_params, prompt_token_ids, arrival_time)
 
         while True:
             try:
-                step_output = await self.request_outputs[req.request_id].get()
+                step_output = await self.request_outputs[request_id].get()
             except asyncio.CancelledError:
                 # The engine returns
                 # Exception should be handled by the engine, not me
@@ -656,7 +656,7 @@ class LLMEngine:
             if step_output.is_finished:
                 break
 
-        del self.request_outputs[req.request_id]
+        del self.request_outputs[request_id]
 
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results for sep_prompt_token=False.
@@ -878,12 +878,12 @@ class LLMEngine:
     def check_health(self) -> None:
         self.model_executor.check_health()
 
-    # def _on_new_step_output_callback(self, request_id: int, step_output: RequestOutput):
-    #     """
-    #     Called by self.prefill_engine or self.decoding_engine when a new output token
-    #     is generated
-    #     """
-    #     self.request_outputs[request_id].put_nowait(step_output)
+    def _on_new_step_output_callback(self, request_id: int, step_output: RequestOutput):
+        """
+        Called by self.prefill_engine or self.decoding_engine when a new output token
+        is generated
+        """
+        self.request_outputs[request_id].put_nowait(step_output)
 
     # def _on_new_lifetime_event_callback(self, request_id: int, event: LifetimeEvent, dont_add_if_dup: bool = False):
     #     """

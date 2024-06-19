@@ -35,7 +35,7 @@ class SingleStageLLMEngine(ABC):
         sched_config: SchedulerConfig,
         placement_groups: List[PlacementGroup],
         model_executor,
-        # engine_on_new_step_output_callback: Callable[[int, StepOutput], None],   # The LLMEngine's callback function when a new StepOutput of a particular request is generated
+        engine_on_new_step_output_callback: Callable[[int, StepOutput], None],   # The LLMEngine's callback function when a new StepOutput of a particular request is generated
         # engine_on_new_lifetime_event_callback: Optional[Callable[[int, LifetimeEvent, bool], None]] = None,   # The LLMEngine's callback function when a new LifetimeEvent of a particular request is generated
     ):
         self.stage = stage
@@ -43,7 +43,7 @@ class SingleStageLLMEngine(ABC):
         self.parallel_config = parallel_config
         self.cache_config = cache_config
         self.sched_config = sched_config
-        # self.engine_on_new_step_output_callback = engine_on_new_step_output_callback
+        self.engine_on_new_step_output_callback = engine_on_new_step_output_callback
         # self.engine_on_new_lifetime_event_callback = engine_on_new_lifetime_event_callback
 
         self.placement_groups = placement_groups
@@ -62,7 +62,7 @@ class PrefillLLMEngine(SingleStageLLMEngine):
         sched_config: SchedulerConfig,
         placement_groups: List[PlacementGroup],
         model_executor,
-        # engine_on_new_step_output_callback: Callable[[int, RequestOutput], None],
+        engine_on_new_step_output_callback: Callable[[int, RequestOutput], None],
         # engine_on_new_lifetime_event_callback: Callable[[int, LifetimeEvent, bool], None]
     ):
 
@@ -74,7 +74,7 @@ class PrefillLLMEngine(SingleStageLLMEngine):
             sched_config,
             placement_groups,
             model_executor,
-            # engine_on_new_step_output_callback,
+            engine_on_new_step_output_callback,
             # engine_on_new_lifetime_event_callback
         )
 
@@ -177,6 +177,11 @@ class PrefillLLMEngine(SingleStageLLMEngine):
         #             else:
         #                 self._free_request_resources(request.request_id)
 
+        self.engine_on_new_step_output_callback(
+            request.request_id,
+            self._process_model_outputs(output, scheduler_outputs)
+        )
+        
         return self._process_model_outputs(output, scheduler_outputs)
     
     # def clear_migrated_blocks_callback(self, migrated_request: MigratingRequest):
@@ -213,7 +218,7 @@ class DecodeLLMEngine(SingleStageLLMEngine):
         placement_groups: List[PlacementGroup],
         model_executor,
         # clear_migrated_blocks_callback: Callable[[Request], None],
-        # engine_on_new_step_output_callback: Callable[[int, StepOutput], None],
+        engine_on_new_step_output_callback: Callable[[int, StepOutput], None],
         # engine_on_new_lifetime_event_callback: Callable[[int, LifetimeEvent, bool], None]
     ):
 
@@ -225,7 +230,7 @@ class DecodeLLMEngine(SingleStageLLMEngine):
             sched_config,
             placement_groups,
             model_executor,
-            # engine_on_new_step_output_callback,
+            engine_on_new_step_output_callback,
             # engine_on_new_lifetime_event_callback
         )
 
@@ -363,6 +368,10 @@ class DecodeLLMEngine(SingleStageLLMEngine):
 
         # # proactive request migraion
         # await self.scheduler.post_process()
+        self.engine_on_new_step_output_callback(
+            request.request_id,
+            self._process_model_outputs(output, scheduler_outputs),
+        )
         return self._process_model_outputs(output, scheduler_outputs)
     
     async def start_event_loop(self):
