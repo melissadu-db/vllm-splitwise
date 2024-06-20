@@ -162,24 +162,33 @@ class LLM:
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
+        num_requests = len(prompts) if prompts is not None else len(prompt_token_ids)
+
+        req_ids = []
+        # Add requests to the engine.
+        for i in range(num_requests):
+            prompt = prompts[i] if prompts is not None else None
+            token_ids = None if prompt_token_ids is None else prompt_token_ids[i]
+            id = self._add_request(prompt, sampling_params, token_ids, lora_request=lora_request)
+            req_ids.append(id)
 
         if self.sep_prompt_token:
-            # Add requests to the engine.
-            num_requests = len(prompts) if prompts is not None else len(prompt_token_ids)
-            for i in range(num_requests):
-                prompt = prompts[i] if prompts is not None else None
-                token_ids = None if prompt_token_ids is None else prompt_token_ids[i]
-                self._add_request(prompt, sampling_params, token_ids, lora_request=lora_request)
+            async def deal_with_request_coroutine(req_id: int) -> RequestOutput:
+                async for output in self.llm_engine.generate(req_id):
+                    if output.finished:
+                        return output
 
-            return self._run_engines(use_tqdm, prompts, prompt_token_ids)
+            async def generate_main() -> List[RequestOutput]:
+                request_tasks = []
+                for id in req_ids:
+                    request_tasks.append(asyncio.create_task(deal_with_request_coroutine(id)))
+                event_loop_task = asyncio.create_task(self.llm_engine.start_all_event_loops())
+                result = await asyncio.gather(*request_tasks)
+                event_loop_task.cancel()
+                return result
+
+            return asyncio.run(generate_main())
         else:
-            # Add requests to the engine.
-            num_requests = len(prompts) if prompts is not None else len(prompt_token_ids)
-            for i in range(num_requests):
-                prompt = prompts[i] if prompts is not None else None
-                token_ids = None if prompt_token_ids is None else prompt_token_ids[i]
-                self._add_request(prompt, sampling_params, token_ids, lora_request=lora_request)
-                
             return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -191,6 +200,7 @@ class LLM:
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id, prompt, sampling_params, prompt_token_ids, lora_request=lora_request)
+        return int(request_id)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
@@ -214,33 +224,3 @@ class LLM:
         outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs
 
-    def _run_engines(self, use_tqdm: bool, prompts, prompt_token_ids) -> List[RequestOutput]:
-        # Initialize tqdm.
-        if use_tqdm:
-            num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests, desc="Processed prompts")
-
-        print(num_requests, prompts, prompt_token_ids)
-
-        # Add requests to the engine.
-        async def deal_with_request_coroutine(req_index: int) -> List[RequestOutput]:
-            prompt = prompts[req_index] if prompts is not None else None
-            token_ids = None if prompt_token_ids is None else prompt_token_ids[req_index]
-            step_outputs = []
-            async for step_output in self.llm_engine.generate(prompt, token_ids, None):
-                step_outputs.append(step_output)
-            return step_outputs
-
-        async def generate_main() -> List[List[RequestOutput]]:
-            request_tasks = []
-            for i in range(num_requests):
-                request_tasks.append(asyncio.create_task(deal_with_request_coroutine(i)))
-            event_loop_task = asyncio.create_task(self.llm_engine.start_all_event_loops())
-            result = await asyncio.gather(*request_tasks)
-            event_loop_task.cancel()
-            return result
-
-        if use_tqdm:
-            pbar.close()
-
-        return asyncio.run(generate_main())

@@ -1,4 +1,5 @@
-import time
+from __future__ import annotations
+import time, copy
 import os
 import copy
 import asyncio
@@ -8,12 +9,12 @@ from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, T
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig, LoRAConfig)
-from vllm.core.scheduler import Scheduler, SchedulerOutputs, SchedulerType
+from vllm.core.block_manager import BlockSpaceManager
+from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster, ray
-from vllm.engine.single_stage_engine import PrefillLLMEngine, DecodeLLMEngine
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -22,6 +23,21 @@ from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup, Sequ
                            SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally, TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method, LifetimeEvent
+from typing import Callable, Optional, List, Dict, Tuple
+from abc import ABC, abstractmethod
+import asyncio
+
+from vllm.core.scheduler import Scheduler
+from vllm.utils import Stage
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, LoRAConfig)
+import ray
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from ray.util.placement_group import PlacementGroup
+from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
+                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
+                    Type, Union, AsyncGenerator)
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -30,6 +46,17 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+
+# Sleep for this many seconds when there is no request in ContextStageLLMEngine.step()
+# We need to sleep for a while because the whole program is a asyncio-based,
+# event driven, single thread program. We save some CPU time for other coroutines.
+SLEEP_WHEN_CONTEXT_NO_REQUEST = 0.003
+
+# Sleep for this many seconds when there is no request in DecodingStageLLMEngine.step()
+SLEEP_WHEN_DECODING_NO_REQUEST = 0.003
+
+# Sleep for this many seconds in each event loop, useful for debugging
+SLEEP_IN_EACH_EVENT_LOOP = 0
 
 
 class LLMEngine:
@@ -105,7 +132,6 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self._init_tokenizer()
         self.seq_counter = Counter()
         if placement_group is None:
             placement_group = initialize_ray_cluster(parallel_config)
@@ -115,8 +141,14 @@ class LLMEngine:
         self.model_executor = model_executor
         self.sep_prompt_token = parallel_config.sep_prompt_token
 
+        self._init_tokenizer()
         if self.sep_prompt_token:
             self.bridge_queue = asyncio.Queue()
+            block_manager = BlockSpaceManager(block_size=self.cache_config.block_size,
+                                            num_gpu_blocks=self.cache_config.num_gpu_blocks,
+                                            num_cpu_blocks=self.cache_config.num_cpu_blocks,
+                                            sliding_window=self.cache_config.sliding_window,
+                                            enable_caching=self.cache_config.enable_prefix_caching)
 
             logger.info("Initializing context stage LLM engine")
             self.prefill_engine = PrefillLLMEngine(
@@ -127,6 +159,7 @@ class LLMEngine:
                 scheduler_config,
                 placement_group,
                 model_executor,
+                block_manager,
                 self._on_new_step_output_callback,
                 # self._on_new_lifetime_event_callback
             )
@@ -140,6 +173,7 @@ class LLMEngine:
                 scheduler_config,
                 placement_group,
                 model_executor,
+                block_manager,
                 # self.prefill_engine.clear_migrated_blocks_callback,
                 self._on_new_step_output_callback,
                 # self._on_new_lifetime_event_callback
@@ -158,10 +192,14 @@ class LLMEngine:
 
             self.prefill_scheduler = self.prefill_engine.scheduler
             self.decoding_scheduler = self.decoding_engine.scheduler
-
+            self.prefill_engine.lora_config = lora_config
+            self.decoding_engine.lora_config = lora_config
+            self.prefill_engine._init_tokenizer()
+            self.decoding_engine._init_tokenizer()
+            
         else:
             # Create the scheduler.
-            self.scheduler = Scheduler(SchedulerType.COMBINED, scheduler_config, cache_config, lora_config,
+            self.scheduler = Scheduler(Stage.COMBINED, scheduler_config, cache_config, lora_config,
                                        self.parallel_config.sep_prompt_token)
 
         # Metric Logging.
@@ -348,9 +386,6 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
-        if self.parallel_config.sep_prompt_token:
-            return self.prefill_scheduler.get_num_unfinished_seq_groups(
-            ) + self.decoding_scheduler.get_num_unfinished_seq_groups()
         return self.scheduler.get_num_unfinished_seq_groups()
 
     def has_unfinished_requests(self) -> bool:
@@ -469,11 +504,7 @@ class LLMEngine:
             # old sequences.
             for seq, parent in child_seqs:
                 if seq is parent and seq.is_finished():
-                    if self.sep_prompt_token:
-                        self.prefill_scheduler.free_seq(seq)
-                        self.decoding_scheduler.free_seq(seq)
-                    else:
-                        self.scheduler.free_seq(seq)
+                    self.scheduler.free_seq(seq)
             return
 
         # Beam search case
@@ -608,18 +639,15 @@ class LLMEngine:
             request_outputs.append(request_output)
 
         # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs))
+        # TODO: Account for combined log_stats
+        # if self.log_stats:
+        #     self.stat_logger.log(self._get_stats(scheduler_outputs))
 
         return request_outputs
 
     async def generate(
         self,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[List[str]],
-        sampling_params: SamplingParams,
-        arrival_time: Optional[float] = None,
-        request_id: Optional[int] = None,
+        request_id: int,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         generate - Generate outputs for one request for sep_prompt_token=True
@@ -627,22 +655,8 @@ class LLMEngine:
         This function is intended to be used as an async generator, i.e., it can be
         used in a for loop. For example, `async for output in engine.generate(...)`
         """
-        # assert self.engine_initialized, "Engine not initialized. Please call engine.initialize() before generating."
-        # req = create_request(
-        #     prompt,
-        #     prompt_token_ids,
-        #     sampling_params,
-        #     self.request_counter,
-        #     self.tokenizer,
-        #     arrival_time,
-        #     request_id,
-        # )
         self.request_outputs[request_id] = asyncio.Queue()
         self.request_lifetime_events[request_id] = []
-
-        # self._on_new_lifetime_event_callback(req.request_id, LifetimeEvent(LifetimeEventType.Issued))
-        self.add_request(request_id, prompt, sampling_params, prompt_token_ids, arrival_time)
-
         while True:
             try:
                 step_output = await self.request_outputs[request_id].get()
@@ -653,7 +667,7 @@ class LLMEngine:
             except GeneratorExit:
                 return
             yield step_output
-            if step_output.is_finished:
+            if step_output.finished:
                 break
 
         del self.request_outputs[request_id]
@@ -883,7 +897,7 @@ class LLMEngine:
         Called by self.prefill_engine or self.decoding_engine when a new output token
         is generated
         """
-        self.request_outputs[request_id].put_nowait(step_output)
+        self.request_outputs[int(request_id)].put_nowait(step_output)
 
     # def _on_new_lifetime_event_callback(self, request_id: int, event: LifetimeEvent, dont_add_if_dup: bool = False):
     #     """
@@ -903,8 +917,260 @@ class LLMEngine:
         mine (LLMEngine's) event loops
         """
         logger.info("Starting LLMEngine's event loops")
-        # assert self.engine_initialized, "Engine not initialized. Please call engine.initialize() before starting event loops."
         await asyncio.gather(
             self.prefill_engine.start_event_loop(),
             self.decoding_engine.start_event_loop(),
         )
+
+class SingleStageLLMEngine(LLMEngine):
+    """
+    SingleStageLLMEngine: An LLMEngine that runs either the context stage or the decoding stage.
+    
+    This class is the base class for ContextStageLLMEngine and DecodingStageLLMEngine.
+    """    
+    def __init__(
+        self,
+        stage: Stage,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        cache_config: CacheConfig,
+        scheduler_config: SchedulerConfig,
+        placement_groups: List[PlacementGroup],
+        model_executor,
+        engine_on_new_step_output_callback: Callable[[int, RequestOutput], None],   # The LLMEngine's callback function when a new RequestOutput of a particular request is generated
+        # engine_on_new_lifetime_event_callback: Optional[Callable[[int, LifetimeEvent, bool], None]] = None,   # The LLMEngine's callback function when a new LifetimeEvent of a particular request is generated
+    ):
+        self.stage = stage
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.cache_config = cache_config
+        self.scheduler_config = scheduler_config
+        self.engine_on_new_step_output_callback = engine_on_new_step_output_callback
+        # self.engine_on_new_lifetime_event_callback = engine_on_new_lifetime_event_callback
+
+        self.placement_groups = placement_groups
+        self.model_executor = model_executor
+        
+        # workers[i][j] is the j-th tensor-parallel worker in pipeline stage i
+        self.workers = []
+    
+    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
+        """Decodes the new token for a sequence."""
+        all_input_ids = seq.get_token_ids()
+        self._decode_logprobs(seq, prms, seq.output_logprobs[-1], all_input_ids)
+
+        (new_tokens, new_output_text, prefix_offset, read_offset) = detokenize_incrementally(
+            self.get_tokenizer_for_seq(seq),
+            all_input_ids=all_input_ids,
+            prev_tokens=seq.tokens,
+            prefix_offset=seq.prefix_offset,
+            read_offset=seq.read_offset,
+            skip_special_tokens=prms.skip_special_tokens,
+            spaces_between_special_tokens=prms.spaces_between_special_tokens,
+        )
+        if seq.tokens is None:
+            seq.tokens = new_tokens
+        else:
+            seq.tokens.extend(new_tokens)
+        seq.prefix_offset = prefix_offset
+        seq.read_offset = read_offset
+        seq.output_text += new_output_text
+
+    def _check_stop(self, seq: Sequence, sampling_params: SamplingParams) -> None:
+        """Stop the finished sequences."""
+        for stop_str in sampling_params.stop:
+            if seq.output_text.endswith(stop_str):
+                self._finalize_sequence(seq, sampling_params, stop_str)
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                return
+        if seq.get_last_token_id() in sampling_params.stop_token_ids:
+            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(seq.get_last_token_id())
+            self._finalize_sequence(seq, sampling_params, stop_str)
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            return
+
+        # Check if the sequence has reached max_model_len.
+        if seq.get_len() > self.scheduler_config.max_model_len:
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the sequence has reached max_tokens.
+        if seq.get_output_len() == sampling_params.max_tokens:
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the sequence has generated the EOS token.
+        if ((not sampling_params.ignore_eos) and seq.get_last_token_id() == seq.eos_token_id):
+            seq.status = SequenceStatus.FINISHED_STOPPED
+
+        
+class PrefillLLMEngine(SingleStageLLMEngine):
+    def __init__(
+        self,
+        bridge_queue: asyncio.Queue[SequenceGroup],
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        cache_config: CacheConfig,
+        scheduler_config: SchedulerConfig,
+        placement_groups: List[PlacementGroup],
+        model_executor,
+        block_manager: BlockSpaceManager,
+        engine_on_new_step_output_callback: Callable[[int, RequestOutput], None],
+        # engine_on_new_lifetime_event_callback: Callable[[int, LifetimeEvent, bool], None]
+    ):
+
+        super().__init__(
+            Stage.PREFILL,
+            model_config,
+            parallel_config,
+            cache_config,
+            scheduler_config,
+            placement_groups,
+            model_executor,
+            engine_on_new_step_output_callback,
+            # engine_on_new_lifetime_event_callback
+        )
+
+        self.scheduler = Scheduler(
+            Stage.PREFILL,
+            scheduler_config,
+            cache_config,
+            block_manager,
+        )
+        
+        # All the batchedrequests that are pushed into the pipeline
+        # Note: len(batched_in_pipeline) <= pp_size and batches are appended in FIFO
+        self.bridge_queue = bridge_queue
+        
+    async def _step(self):
+        """
+        Run one step of inference on the batch of requests chosen by the scheduler.
+        
+        Note: if pipeline parallelism is used, one step only kicks one stage of execution,
+        and each request needs #pp steps in total to generate one token.
+        
+        Note2. Pipeline parallel is not tested yet
+        """
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+
+        if not seq_group_metadata_list:
+            output = []
+        else:
+            output = self.model_executor.execute_model(
+                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
+                scheduler_outputs.blocks_to_swap_out,
+                scheduler_outputs.blocks_to_copy,
+                scheduler_outputs.blocks_to_nw)
+        
+        if output:
+            output = self._process_model_outputs(output, scheduler_outputs)
+            print(len(output))
+            for i in range(len(output)):
+                request = output[i]
+                seq_group = scheduler_outputs.scheduled_seq_groups[i]
+                self.engine_on_new_step_output_callback(
+                    request.request_id,
+                    request,
+                )
+                if not request.finished:
+                    self.bridge_queue.put_nowait(seq_group) # This won't panic because the queue is unbounded
+        
+    async def start_event_loop(self):
+        async def event_loop1():
+            while self.has_unfinished_requests():
+                await self._step()
+        
+        async def event_loop2():
+            while True:
+                self.print_engine_status()
+                await asyncio.sleep(_LOCAL_LOGGING_INTERVAL_SEC)
+
+        await asyncio.gather(event_loop1(), event_loop2())
+        
+    def print_engine_status(self):
+        self.scheduler.print_status()
+
+class DecodeLLMEngine(SingleStageLLMEngine):
+    def __init__(
+        self,
+        bridge_queue: asyncio.Queue[SequenceGroup],
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        cache_config: CacheConfig,
+        scheduler_config: SchedulerConfig,
+        placement_groups: List[PlacementGroup],
+        model_executor,
+        block_manager: BlockSpaceManager,
+        # clear_migrated_blocks_callback: Callable[[Request], None],
+        engine_on_new_step_output_callback: Callable[[int, RequestOutput], None],
+        # engine_on_new_lifetime_event_callback: Callable[[int, LifetimeEvent, bool], None]
+    ):
+
+        super().__init__(
+            Stage.DECODE,
+            model_config,
+            parallel_config,
+            cache_config,
+            scheduler_config,
+            placement_groups,
+            model_executor,
+            engine_on_new_step_output_callback,
+            # engine_on_new_lifetime_event_callback
+        )
+
+        self.scheduler = Scheduler(
+            Stage.DECODE,
+            scheduler_config,
+            cache_config,
+            block_manager
+        )
+        
+        self.bridge_queue = bridge_queue
+        # self.clear_migrated_blocks_callback = clear_migrated_blocks_callback
+            
+    async def _step(self) -> None:
+        """
+        Run one step of inference on the batch of requests chosen by the scheduler.
+        Note: if pipeline parallelism is used, one step only kicks one stage of execution,
+        and each request needs #pp steps in total to generate one token.
+        """
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        if not seq_group_metadata_list:
+            output = []
+        else:
+            output = self.model_executor.execute_model(
+                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
+                scheduler_outputs.blocks_to_swap_out,
+                scheduler_outputs.blocks_to_copy,
+                scheduler_outputs.blocks_to_nw)
+
+        output = self._process_model_outputs(output, scheduler_outputs)
+        for request in output:
+            self.engine_on_new_step_output_callback(
+                request.request_id,
+                request
+            )
+    
+    async def start_event_loop(self):
+        async def event_loop1():
+            # Event loop 1. Add migrating request to the scheduler
+            while True:
+                migrating_seq_group = await self.bridge_queue.get()
+                self.scheduler.running.append(migrating_seq_group)
+                self.bridge_queue.task_done()
+        
+        async def event_loop2():
+            # Event loop 2. Run step()
+            while self.has_unfinished_requests():
+                await self._step()
+        
+        async def event_loop3():
+            # Event loop 3. Print engine status
+            while True:
+                self.print_engine_status()
+                await asyncio.sleep(_LOCAL_LOGGING_INTERVAL_SEC)
+                
+        await asyncio.gather(event_loop1(), event_loop2(), event_loop3())
+    
+    def print_engine_status(self):
+        self.scheduler.print_status()

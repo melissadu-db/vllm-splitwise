@@ -510,8 +510,9 @@ class LifetimeEvent(json.JSONEncoder):
 
 
 class Stage(enum.Enum):
-    CONTEXT = "context"
-    DECODING = "decoding"
+    PREFILL = enum.auto()
+    DECODE = enum.auto()
+    COMBINED = enum.auto()
 
     def __str__(self) -> str:
         return self.value

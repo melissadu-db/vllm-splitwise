@@ -11,20 +11,10 @@ from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup, SequenceGroupMetadata, SequenceStatus)
 from vllm.prefix import PrefixPool
 from vllm.utils import SeqToSlotMapper, coalesce_blocks_by_id
+from vllm.utils import Stage
+
 
 logger = init_logger(__name__)
-
-
-class SchedulerType(enum.Enum):
-    """
-
-    1. Prefill: Prefill the blocks of the sequences in the WAITING state.
-    2. Decode: Schedule the sequences in the RUNNING state.
-    3. Combined: No disaggregation of prefill and decode
-    """
-    PREFILL = enum.auto()
-    DECODE = enum.auto()
-    COMBINED = enum.auto()
 
 class PreemptionMode(enum.Enum):
     """Preemption modes.
@@ -91,13 +81,14 @@ class Scheduler:
 
     def __init__(
         self,
-        scheduler_type: SchedulerType,
+        stage: Stage,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
+        block_manager: Optional[BlockSpaceManager] = None,
         lora_config: Optional[LoRAConfig] = None,
-        track_prompt_blocks: bool = False,
+        track_prompt_blocks: bool = False
     ) -> None:
-        self.scheduler_type = scheduler_type
+        self.stage = stage
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         # Note for LoRA scheduling: the current policy is extremely
@@ -114,11 +105,14 @@ class Scheduler:
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
-        self.block_manager = BlockSpaceManager(block_size=self.cache_config.block_size,
-                                               num_gpu_blocks=self.cache_config.num_gpu_blocks,
-                                               num_cpu_blocks=self.cache_config.num_cpu_blocks,
-                                               sliding_window=self.cache_config.sliding_window,
-                                               enable_caching=self.cache_config.enable_prefix_caching)
+        if block_manager:
+            self.block_manager = block_manager
+        else:
+            self.block_manager = BlockSpaceManager(block_size=self.cache_config.block_size,
+                                                    num_gpu_blocks=self.cache_config.num_gpu_blocks,
+                                                    num_cpu_blocks=self.cache_config.num_cpu_blocks,
+                                                    sliding_window=self.cache_config.sliding_window,
+                                                    enable_caching=self.cache_config.enable_prefix_caching)
 
         # Create the prefix pool to cache the prefixes.
         self.prefix_pool = PrefixPool(self.cache_config.block_size)
@@ -152,7 +146,7 @@ class Scheduler:
             request_id: The ID(s) of the sequence group to abort.
         """
         if isinstance(request_id, str):
-            request_id = (request_id,)
+            request_id = (request_id, )
         request_ids = set(request_id)
         for state_queue in [self.waiting, self.running, self.swapped]:
             aborted_groups: List[SequenceGroup] = []
@@ -395,12 +389,12 @@ class Scheduler:
     def _schedule(self) -> SchedulerOutputs:
         # Fix the current time.
         now = time.monotonic()
-        if self.scheduler_type == SchedulerType.PREFILL:
+        if self.stage == Stage.PREFILL:
             outputs = self._schedule_prompt(now)
             # if outputs:
             #     self.running.extendleft(outputs.scheduled_seq_groups)
 
-        elif self.scheduler_type == SchedulerType.DECODE:
+        elif self.stage == Stage.DECODE:
             outputs = self._schedule_decode(now)
         
         else:
@@ -557,3 +551,8 @@ class Scheduler:
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         self.block_manager.mark_blocks_as_computed(seq_group)
+
+    def print_status(self) -> None:
+        stage = "(PREFILL)" if self.stage == Stage.PREFILL else "(DECODE)"
+        stage = "" if self.stage == Stage.COMBINED else stage
+        logger.info(f"{stage} {len(self.waiting)} waiting, {len(self.running)} running, {len(self.swapped)} swapped")
