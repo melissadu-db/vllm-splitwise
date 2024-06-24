@@ -5,7 +5,6 @@ import copy
 import asyncio
 from collections import defaultdict
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Type, Union, AsyncGenerator)
-
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig, LoRAConfig)
@@ -25,7 +24,6 @@ from vllm.transformers_utils.tokenizer import (detokenize_incrementally, Tokeniz
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method, LifetimeEvent
 from typing import Callable, Optional, List, Dict, Tuple
 from abc import ABC, abstractmethod
-import asyncio
 
 from vllm.core.scheduler import Scheduler
 from vllm.utils import Stage
@@ -143,7 +141,6 @@ class LLMEngine:
 
         self._init_tokenizer()
         if self.sep_prompt_token:
-            self.bridge_queue = asyncio.Queue()
             block_manager = BlockSpaceManager(block_size=self.cache_config.block_size,
                                             num_gpu_blocks=self.cache_config.num_gpu_blocks,
                                             num_cpu_blocks=self.cache_config.num_cpu_blocks,
@@ -151,8 +148,9 @@ class LLMEngine:
                                             enable_caching=self.cache_config.enable_prefix_caching)
 
             logger.info("Initializing context stage LLM engine")
+            bridge_queue = asyncio.Queue()
             self.prefill_engine = PrefillLLMEngine(
-                self.bridge_queue,
+                bridge_queue,
                 model_config,
                 parallel_config,
                 cache_config,
@@ -166,7 +164,7 @@ class LLMEngine:
 
             logger.info("Initializing decoding stage LLM engine")
             self.decoding_engine = DecodeLLMEngine(
-                self.bridge_queue,
+                bridge_queue,
                 model_config,
                 parallel_config,
                 cache_config,
@@ -1064,7 +1062,6 @@ class PrefillLLMEngine(SingleStageLLMEngine):
         
         if output:
             output = self._process_model_outputs(output, scheduler_outputs)
-            print(len(output))
             for i in range(len(output)):
                 request = output[i]
                 seq_group = scheduler_outputs.scheduled_seq_groups[i]
@@ -1074,10 +1071,12 @@ class PrefillLLMEngine(SingleStageLLMEngine):
                 )
                 if not request.finished:
                     self.bridge_queue.put_nowait(seq_group) # This won't panic because the queue is unbounded
+                else:
+                    self.prefill_scheduler.free_seq(seq_group)
         
     async def start_event_loop(self):
         async def event_loop1():
-            while self.has_unfinished_requests():
+            while True:
                 await self._step()
         
         async def event_loop2():
@@ -1161,7 +1160,7 @@ class DecodeLLMEngine(SingleStageLLMEngine):
         
         async def event_loop2():
             # Event loop 2. Run step()
-            while self.has_unfinished_requests():
+            while True:
                 await self._step()
         
         async def event_loop3():

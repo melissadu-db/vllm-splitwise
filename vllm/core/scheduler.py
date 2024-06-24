@@ -391,8 +391,6 @@ class Scheduler:
         now = time.monotonic()
         if self.stage == Stage.PREFILL:
             outputs = self._schedule_prompt(now)
-            # if outputs:
-            #     self.running.extendleft(outputs.scheduled_seq_groups)
 
         elif self.stage == Stage.DECODE:
             outputs = self._schedule_decode(now)
@@ -430,7 +428,7 @@ class Scheduler:
 
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
-                    is_prompt=True,
+                    is_prompt=outputs.prompt_run,
                     seq_data=seq_data,
                     sampling_params=seq_group.sampling_params,
                     block_tables=block_tables,

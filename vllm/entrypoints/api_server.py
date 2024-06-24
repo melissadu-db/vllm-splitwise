@@ -10,6 +10,7 @@ import argparse
 import json
 import time
 from typing import AsyncGenerator
+import random
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -44,8 +45,7 @@ async def generate(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
-    request_id = random_uuid()
-
+    request_id = random.randint(0, 1000000) # Could have overlap
     results_generator = engine.generate(prompt,
                                         sampling_params,
                                         request_id)

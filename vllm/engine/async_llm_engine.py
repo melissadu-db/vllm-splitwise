@@ -3,7 +3,7 @@ import os
 import time
 from functools import partial
 from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union, AsyncIterator)
+                    Union, AsyncIterator, AsyncGenerator)
 
 from transformers import PreTrainedTokenizer
 
@@ -374,6 +374,16 @@ class AsyncLLMEngine:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
+    async def start_event_loop(self):
+        """Start the underlying LLMEngine's event loop
+        
+        This function should be called at the beginning of the server.
+        """
+        bridge_queue = asyncio.Queue()
+        self.engine.prefill_engine.bridge_queue = bridge_queue
+        self.engine.decoding_engine.bridge_queue = bridge_queue
+        await self.engine.start_all_event_loops()
+
     def start_background_loop(self) -> None:
         """Start the background loop."""
         if self.errored:
@@ -384,8 +394,13 @@ class AsyncLLMEngine:
         # Initialize the RequestTracker here so it uses the right event loop.
         self._request_tracker = RequestTracker()
 
-        self._background_loop_unshielded = asyncio.get_event_loop(
-        ).create_task(self.run_engine_loop())
+        if self.engine.sep_prompt_token:   
+            self._background_loop_unshielded = asyncio.get_event_loop(
+            ).create_task(self.start_event_loop())
+            
+        else:
+            self._background_loop_unshielded = asyncio.get_event_loop(
+            ).create_task(self.run_engine_loop())
         self._background_loop_unshielded.add_done_callback(
             partial(_raise_exception_on_finish,
                     error_callback=self._error_callback))
@@ -609,23 +624,31 @@ class AsyncLLMEngine:
         # This should not be used for logging, as it is monotonic time.
         arrival_time = time.monotonic()
 
-        try:
-            stream = await self.add_request(
-                request_id,
-                prompt,
-                sampling_params,
-                prompt_token_ids=prompt_token_ids,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-            )
+        if self.engine.sep_prompt_token:
+            self.engine.add_request(request_id, prompt, sampling_params, prompt_token_ids, arrival_time, lora_request)
+            if not self.is_running:
+                self.start_background_loop()
+            async for output in self.engine.generate(request_id):
+                yield output
 
-            async for request_output in stream:
-                yield request_output
-        except (Exception, asyncio.CancelledError) as e:
-            # If there is an exception or coroutine is cancelled, abort the
-            # request.
-            self._abort(request_id)
-            raise e
+        else:
+            try:
+                stream = await self.add_request(
+                    request_id,
+                    prompt,
+                    sampling_params,
+                    prompt_token_ids=prompt_token_ids,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                )
+
+                async for request_output in stream:
+                    yield request_output
+            except (Exception, asyncio.CancelledError) as e:
+                # If there is an exception or coroutine is cancelled, abort the
+                # request.
+                self._abort(request_id)
+                raise e
 
     async def abort(self, request_id: str) -> None:
         """Abort a request.
