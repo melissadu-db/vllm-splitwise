@@ -1078,6 +1078,7 @@ class PrefillLLMEngine(SingleStageLLMEngine):
         async def event_loop1():
             while True:
                 await self._step()
+                await asyncio.sleep(SLEEP_IN_EACH_EVENT_LOOP)
         
         async def event_loop2():
             while True:
@@ -1162,6 +1163,7 @@ class DecodeLLMEngine(SingleStageLLMEngine):
             # Event loop 2. Run step()
             while True:
                 await self._step()
+                await asyncio.sleep(SLEEP_IN_EACH_EVENT_LOOP)
         
         async def event_loop3():
             # Event loop 3. Print engine status
