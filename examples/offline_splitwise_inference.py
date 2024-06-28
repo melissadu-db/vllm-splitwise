@@ -6,51 +6,49 @@ Run `python examples/offline_splitwise_inference.py --sep-prompt-token --tensor-
 from vllm import LLM, SamplingParams, AsyncEngineArgs, AsyncLLMEngine
 import argparse
 import torch
+from vllm.utils import random_uuid
+import asyncio
 
 assert torch.cuda.device_count() >= 2, "Need at least 2 GPUs to run this example."
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Splitwise example")
-    
-    parser = AsyncEngineArgs.add_cli_args(parser)
-    return parser.parse_args()
-
 # Sample prompts.
 prompts = [
-    # "Hello, my name is",
-    "The president of the United States is",
-    # "The capital of France is",
-    # "The future of AI is",
-]
-
-prompts = [
-    "Life blooms like a flower. Far away or by the road. Waiting",
-    "A quick brown fox",
-    "Artificial intelligence is",
-    "To be or not to be,",
-    "one two three four"
+    "Life blooms like a flower. Far away or by the road. Waiting", "A quick brown fox", "Artificial intelligence is",
+    "To be or not to be,", "one two three four"
 ]
 
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0)
 
-if __name__ == "__main__":
+
+async def generate_and_process(engine, prompt, sampling_params, request_id):
+    async for output in engine.generate(prompt, sampling_params, request_id):
+        final_output = output
+    prompt = final_output.prompt
+    text_outputs = [prompt + output.text for output in final_output.outputs]
+    print(f"Prompt: {prompt!r}, Generated text: {text_outputs!r}")
+    return text_outputs
+
+
+async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default='meta-llama/Meta-Llama-3-8B-Instruct')
-    parser.add_argument("--sep-prompt-token", action="store_true", default=False)
-    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     # Create an LLM.
-    llm = LLM(**vars(args))
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-    # Generate texts from the prompts. The output is a list of RequestOutput objects
-    # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params)
+    request_id = random_uuid()
 
-    # Print the outputs.
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    # Generate texts from the prompts asynchronously.
+    tasks = []
+    for prompt in prompts:
+        task = asyncio.create_task(generate_and_process(engine, prompt, sampling_params, request_id))
+        tasks.append(task)
+
+    # Wait for all tasks to complete.
+    await asyncio.gather(*tasks)
+
+
+asyncio.run(main())
