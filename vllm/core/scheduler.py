@@ -113,9 +113,6 @@ class Scheduler:
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
-        # Create the prefix pool to cache the prefixes.
-        self.prefix_pool = PrefixPool(self.cache_config.block_size)
-
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.
