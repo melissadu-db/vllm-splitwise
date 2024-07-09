@@ -160,7 +160,7 @@ class OpenAIServing:
             if request.model == lora.lora_name:
                 return lora
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError(f"The model {request.model} does not exist. Must be in {valid_models}")
+        # raise ValueError(f"The model {request.model} does not exist. Must be in {valid_models}")
 
     def _validate_prompt_and_tokenize(
             self,
