@@ -170,15 +170,12 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def _schedule(self) -> SchedulerOutputs:
+    def _schedule_prompt(self, now) -> SchedulerOutputs:
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
         blocks_to_nw: Dict[int, List[int]] = defaultdict(list)
-
-        # Fix the current time.
-        now = time.monotonic()
 
         # Join waiting sequences if possible.
         if not self.swapped:
@@ -245,6 +242,7 @@ class Scheduler:
                 num_batched_tokens = len(new_seq_lens) * max(new_seq_lens)
                 if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
+                    print("Exceeding max num batched tokens")
                     break
 
                 # The total number of sequences in the RUNNING state should not
@@ -252,6 +250,7 @@ class Scheduler:
                 num_new_seqs = seq_group.get_max_num_running_seqs()
                 if (num_curr_seqs + num_new_seqs >
                         self.scheduler_config.max_num_seqs):
+                    print("Exceeding max num seqs")
                     break
 
                 num_paddings = num_batched_tokens - sum(new_seq_lens)
@@ -263,7 +262,7 @@ class Scheduler:
                     curr_loras.add(lora_int_id)
                 self.waiting.popleft()
                 self._allocate(seq_group)
-                self.running.append(seq_group)
+                # self.running.append(seq_group) # MOVED TO AFTER 
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
                 if self.track_prompt_blocks:
@@ -279,7 +278,7 @@ class Scheduler:
             self.waiting.extendleft(leftover_waiting_sequences)
 
             if scheduled or ignored_seq_groups:
-                scheduler_outputs = SchedulerOutputs(
+                prompt_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
                     num_batched_tokens=len(seq_lens) *
@@ -290,7 +289,15 @@ class Scheduler:
                     blocks_to_nw=coalesce_blocks_by_id(blocks_to_nw),
                     ignored_seq_groups=ignored_seq_groups,
                 )
-                return scheduler_outputs
+                return prompt_outputs
+        return None
+
+    def _schedule_decode(self, now) -> SchedulerOutputs:
+        # Blocks that need to be swapped or copied before model execution.
+        blocks_to_swap_in: Dict[int, int] = {}
+        blocks_to_swap_out: Dict[int, int] = {}
+        blocks_to_copy: Dict[int, List[int]] = {}
+        blocks_to_nw: Dict[int, List[int]] = defaultdict(list)
 
         # NOTE(woosuk): Preemption happens only when there is no available slot
         # to keep all the sequence groups in the RUNNING state.
@@ -384,7 +391,7 @@ class Scheduler:
                             seq.seq_id)
                         blocks_to_nw[slot_id].extend(block_ids)
 
-        scheduler_outputs = SchedulerOutputs(
+        decode_outputs = SchedulerOutputs(
             scheduled_seq_groups=self.running,
             prompt_run=False,
             num_batched_tokens=num_batched_tokens,
@@ -394,42 +401,80 @@ class Scheduler:
             blocks_to_nw=coalesce_blocks_by_id(blocks_to_nw),
             ignored_seq_groups=[],
         )
-        return scheduler_outputs
+        return decode_outputs
+
+    def _schedule(self) -> SchedulerOutputs:
+        # Fix the current time.
+        now = time.monotonic()
+        prompt_outputs = self._schedule_prompt(now)
+        decode_outputs = self._schedule_decode(now)
+        if prompt_outputs:
+            self.running.extendleft(prompt_outputs.scheduled_seq_groups)
+        return prompt_outputs, decode_outputs
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        scheduler_outputs = self._schedule()
+        prompt_outputs, decode_outputs = self._schedule()
         now = time.time()
 
         # Create input data structures.
-        seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        for seq_group in scheduler_outputs.scheduled_seq_groups:
-            seq_group.maybe_set_first_scheduled_time(now)
+        prompt_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        decode_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        if prompt_outputs:
+            for seq_group in prompt_outputs.scheduled_seq_groups:
+                seq_group.maybe_set_first_scheduled_time(now)
 
-            seq_data: Dict[int, SequenceData] = {}
-            block_tables: Dict[int, List[int]] = {}
+                seq_data: Dict[int, SequenceData] = {}
+                block_tables: Dict[int, List[int]] = {}
 
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                seq_id = seq.seq_id
-                seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
-                self.block_manager.access_all_blocks_in_seq(seq, now)
+                for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                    seq_id = seq.seq_id
+                    seq_data[seq_id] = seq.data
+                    block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                    self.block_manager.access_all_blocks_in_seq(seq, now)
 
-            seq_group_metadata = SequenceGroupMetadata(
-                request_id=seq_group.request_id,
-                is_prompt=scheduler_outputs.prompt_run,
-                seq_data=seq_data,
-                sampling_params=seq_group.sampling_params,
-                block_tables=block_tables,
-                lora_request=seq_group.lora_request,
-                computed_block_nums=self.block_manager.
-                get_common_computed_block_ids(seq_group),
-                state=seq_group.state,
-            )
-            seq_group_metadata_list.append(seq_group_metadata)
-        return seq_group_metadata_list, scheduler_outputs
+                seq_group_metadata = SequenceGroupMetadata(
+                    request_id=seq_group.request_id,
+                    is_prompt=True,
+                    seq_data=seq_data,
+                    sampling_params=seq_group.sampling_params,
+                    block_tables=block_tables,
+                    lora_request=seq_group.lora_request,
+                    computed_block_nums=self.block_manager.
+                    get_common_computed_block_ids(seq_group),
+                    state=seq_group.state,
+                )
+                prompt_seq_group_metadata_list.append(seq_group_metadata)
+        
+        if decode_outputs:
+            for seq_group in decode_outputs.scheduled_seq_groups:
+                seq_group.maybe_set_first_scheduled_time(now)
+
+                seq_data: Dict[int, SequenceData] = {}
+                block_tables: Dict[int, List[int]] = {}
+
+                for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                    seq_id = seq.seq_id
+                    seq_data[seq_id] = seq.data
+                    block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                    self.block_manager.access_all_blocks_in_seq(seq, now)
+
+                seq_group_metadata = SequenceGroupMetadata(
+                    request_id=seq_group.request_id,
+                    is_prompt=False,
+                    seq_data=seq_data,
+                    sampling_params=seq_group.sampling_params,
+                    block_tables=block_tables,
+                    lora_request=seq_group.lora_request,
+                    computed_block_nums=self.block_manager.
+                    get_common_computed_block_ids(seq_group),
+                    state=seq_group.state,
+                )
+                decode_seq_group_metadata_list.append(seq_group_metadata)
+
+        return prompt_seq_group_metadata_list, decode_seq_group_metadata_list, prompt_outputs, decode_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         self.block_manager.fork(parent_seq, child_seq)
