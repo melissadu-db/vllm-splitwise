@@ -401,7 +401,6 @@ class Scheduler:
             if prompt_outputs:
                 self.running.extendleft(prompt_outputs.scheduled_seq_groups)
             outputs = prompt_outputs if prompt_outputs else decode_outputs
-
         return outputs
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:

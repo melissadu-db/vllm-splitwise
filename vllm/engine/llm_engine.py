@@ -730,6 +730,7 @@ class LLMEngine:
                                                        scheduler_outputs.blocks_to_swap_out,
                                                        scheduler_outputs.blocks_to_copy, scheduler_outputs.blocks_to_nw)
 
+        print("output", [item.seq_data for item in seq_group_metadata_list])
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
@@ -840,6 +841,7 @@ class LLMEngine:
             seq.tokens.extend(new_tokens)
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
+        print(seq.output_text, new_output_text)
         seq.output_text += new_output_text
 
     def _check_stop(self, seq: Sequence, sampling_params: SamplingParams) -> None:
@@ -1061,7 +1063,9 @@ class PrefillLLMEngine(SingleStageLLMEngine):
                 scheduler_outputs.blocks_to_nw)
         
         if output:
+            print("prompt output", [item.seq_data for item in seq_group_metadata_list])
             output = self._process_model_outputs(output, scheduler_outputs)
+            print([out.outputs[0].text for out in output])
             for i in range(len(output)):
                 request = output[i]
                 seq_group = scheduler_outputs.scheduled_seq_groups[i]
@@ -1145,6 +1149,7 @@ class DecodeLLMEngine(SingleStageLLMEngine):
                 scheduler_outputs.blocks_to_nw)
 
         output = self._process_model_outputs(output, scheduler_outputs)
+        print("decode output", [item.seq_data for item in seq_group_metadata_list])
         for request in output:
             self.engine_on_new_step_output_callback(
                 request.request_id,
