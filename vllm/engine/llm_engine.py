@@ -13,7 +13,7 @@ from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.engine.metrics import StatLogger, Stats
-from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster, ray
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster, initialize_placement_disagg, ray
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -111,6 +111,8 @@ class LLMEngine:
                     f"download_dir={model_config.download_dir!r}, "
                     f"load_format={model_config.load_format}, "
                     f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+                    f"prefill_tp={parallel_config.prefill_tp}, "
+                    f"decode_tp={parallel_config.decode_tp}, "
                     f"sep_prompt_token={parallel_config.sep_prompt_token}, "
                     f"disable_custom_all_reduce="
                     f"{parallel_config.disable_custom_all_reduce}, "
@@ -132,7 +134,10 @@ class LLMEngine:
 
         self.seq_counter = Counter()
         if placement_group is None:
-            placement_group = initialize_ray_cluster(parallel_config)
+            if parallel_config.sep_prompt_token:
+                placement_group = initialize_placement_disagg(parallel_config, model_config)
+            else:
+                placement_group = initialize_ray_cluster(parallel_config)
 
         model_executor = executor_class(model_config, cache_config, parallel_config, scheduler_config, device_config,
                                         lora_config)
@@ -231,8 +236,12 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
+        model_config = engine_configs[0]
         parallel_config = engine_configs[2]
-        placement_group = initialize_ray_cluster(parallel_config)
+        if parallel_config.sep_prompt_token:
+            placement_group = initialize_placement_disagg(parallel_config, model_config)
+        else:
+            placement_group = initialize_ray_cluster(parallel_config)
 
         # Create the parallel GPU workers.
         if parallel_config.worker_use_ray:
@@ -1149,7 +1158,6 @@ class DecodeLLMEngine(SingleStageLLMEngine):
                 scheduler_outputs.blocks_to_nw)
 
         output = self._process_model_outputs(output, scheduler_outputs)
-        print("decode output", [item.seq_data for item in seq_group_metadata_list])
         for request in output:
             self.engine_on_new_step_output_callback(
                 request.request_id,

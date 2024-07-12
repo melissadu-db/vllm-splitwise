@@ -215,7 +215,17 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = self.hf_config.num_attention_heads
+        total_num_attention_heads = self.hf_config.num_attention_heads        
+        if total_num_attention_heads % parallel_config.prefill_tp != 0:
+            raise ValueError(
+                f"Total number of attention heads ({total_num_attention_heads})"
+                " must be divisible by prefill tensor parallel size "
+                f"({parallel_config.prefill_tp}).")
+        if total_num_attention_heads % parallel_config.decode_tp != 0:
+            raise ValueError(
+                f"Total number of attention heads ({total_num_attention_heads})"
+                " must be divisible by decode tensor parallel size "
+                f"({parallel_config.decode_tp}).")
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
@@ -407,6 +417,8 @@ class ParallelConfig:
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         worker_use_ray: bool,
+        prefill_tp: Optional[int] = None,
+        decode_tp: Optional[int] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         ray_workers_use_nsight: bool = False,
@@ -424,11 +436,17 @@ class ParallelConfig:
         else:
             self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
+        self.prefill_tp = prefill_tp
+        self.decode_tp = decode_tp
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
         self.sep_prompt_token = sep_prompt_token
+        if not prefill_tp:
+            self.prefill_tp = tensor_parallel_size
+        if not decode_tp:
+            self.decode_tp = tensor_parallel_size
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         if sep_prompt_token:

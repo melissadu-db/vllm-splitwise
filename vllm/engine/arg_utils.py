@@ -23,6 +23,8 @@ class EngineArgs:
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    prefill_tp: Optional[int] = None
+    decode_tp: Optional[int] = None
     max_parallel_loading_workers: Optional[int] = None
     sep_prompt_token: bool = False
     block_size: int = 16
@@ -322,6 +324,8 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
+                                         self.prefill_tp,
+                                         self.decode_tp,
                                          self.max_parallel_loading_workers,
                                          self.disable_custom_all_reduce,
                                          self.ray_workers_use_nsight,

@@ -1,6 +1,6 @@
 from typing import Optional, List, Tuple, TYPE_CHECKING
 import pickle
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.utils import is_hip, set_cuda_visible_devices, get_ip
 
@@ -138,3 +138,55 @@ def initialize_ray_cluster(
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
     return current_placement_group
+
+def initialize_placement_disagg(
+    parallel_config: ParallelConfig,
+    model_config: ModelConfig,
+    ray_address: Optional[str] = None,
+) -> Optional["PlacementGroup"]:
+        """
+        Create placement groups for all engines and all workers
+        
+        Currently we force the same layer of the context & decoding stage to be executed
+        on the same node (we call this "aligned"). This simplifies k/v cache migration.
+        """
+        prefill_tp = parallel_config.prefill_tp
+        decode_tp = parallel_config.decode_tp
+        prefill_pp = 1
+        decode_pp = 1
+        
+        # Each placement group is responsible for `layer_per_placement_group` layers
+        # Pipeline parallelism isn't supported yet, so number of layers is the same
+        layer_per_placement_group = model_config.get_num_layers(parallel_config)
+        
+        # Each placement group contains `workers_per_placement_group` workers
+        workers_per_placement_group = \
+            layer_per_placement_group // layer_per_placement_group * prefill_tp \
+            + layer_per_placement_group // layer_per_placement_group * decode_tp
+        
+        # There should be `num_placement_groups` placement groups in total
+        # Without pipeline parallelism, there should only be one placement group
+        num_placement_groups = 1
+        assert num_placement_groups * workers_per_placement_group == \
+            prefill_pp * prefill_tp + decode_pp * decode_tp, \
+            f"Expected {workers_per_placement_group}, got {prefill_pp * prefill_tp + decode_pp * decode_tp}"
+        
+        # Create placement groups
+        placement_group = ray.util.placement_group(
+            [ { "GPU": 1 }] * workers_per_placement_group,
+            strategy="STRICT_PACK",
+        )
+        ray.get(placement_group.ready(), timeout=1000)
+
+        # No pipeline parallelism means we don't support multiple placement groups by layer
+        # placement_groups = []
+        # for i in range(num_placement_groups):
+        #     placement_group = ray.util.placement_group(
+        #         [ { "GPU": 1 }] * workers_per_placement_group,
+        #         strategy="STRICT_PACK",
+        #     )
+        #     ray.get(placement_group.ready(), timeout=1000)
+        #     placement_groups.append(placement_group)
+        
+        parallel_config.placement_group = placement_group
+        return placement_group
