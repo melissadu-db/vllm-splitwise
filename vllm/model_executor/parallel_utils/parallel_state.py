@@ -18,6 +18,44 @@ _STAGE_PARALLEL_GROUP = None
 # source rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = None
 
+def initialize_model_parallel_disagg(
+    prefill_tp: int = 1,
+    decode_tp: int = 1,
+) -> None:
+    # Get world size and rank. Ensure some consistencies.
+    assert torch.distributed.is_initialized()
+    world_size: int = torch.distributed.get_world_size()
+
+    if (world_size != prefill_tp + decode_tp):
+        raise RuntimeError(
+            f"world_size ({world_size}) is not equal to "
+            f"# of tensor parallel groups ({prefill_tp + decode_tp})")
+
+    num_tensor_model_parallel_groups: int = (world_size // (prefill_tp + decode_tp))
+    rank = torch.distributed.get_rank()
+
+    # Build the tensor model-parallel groups.
+    global _TENSOR_MODEL_PARALLEL_GROUP
+    assert _TENSOR_MODEL_PARALLEL_GROUP is None, (
+        "tensor model parallel group is already initialized")
+    for i in range(num_tensor_model_parallel_groups):
+        ranks = range(i * tensor_model_parallel_size,
+                      (i + 1) * tensor_model_parallel_size)
+        group = torch.distributed.new_group(ranks)
+        if rank in ranks:
+            _TENSOR_MODEL_PARALLEL_GROUP = group
+
+    global _STAGE_PARALLEL_GROUP
+    if num_tensor_model_parallel_groups == 2:
+        _STAGE_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
+    else:
+        prompt_group = torch.distributed.new_group(prefill_tp)
+        token_group = torch.distributed.new_group(
+            range(prefill_tp, world_size))
+        if rank < prefill_tp:
+            _STAGE_PARALLEL_GROUP = prompt_group
+        else:
+            _STAGE_PARALLEL_GROUP = token_group
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
@@ -49,8 +87,6 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
-    # World size is scaled by two in case of separate prompt token machines.
-    scale_factor: int = 2 if sep_prompt_token else 1
 
     if (world_size != tensor_model_parallel_size *
             pipeline_model_parallel_size * scale_factor):
@@ -102,11 +138,22 @@ def initialize_model_parallel(
             else:
                 _STAGE_PARALLEL_GROUP = token_group
 
+def ensure_model_parallel_initialized_disagg(
+    prefill_tp: int,
+    decode_tp: int,
+) -> None:
+    if not model_parallel_is_initialized():
+        initialize_model_parallel_disagg(prefill_tp, decode_tp)
+        return
+    assert (
+        get_tensor_model_parallel_world_size() == tensor_model_parallel_size
+    ), ("tensor parallel group already initialized, but of unexpected size: "
+        f"{get_tensor_model_parallel_world_size()=} vs. "
+        f"{tensor_model_parallel_size=}")
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
-    sep_prompt_token: bool = False,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -114,8 +161,7 @@ def ensure_model_parallel_initialized(
     """
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size,
-                                  sep_prompt_token)
+                                  pipeline_model_parallel_size)
         return
 
     assert (

@@ -451,8 +451,10 @@ class ParallelConfig:
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         if sep_prompt_token:
             # Half of the workers are prompt workers and the other half are token
-            self.num_prompt_workers = self.world_size
-            self.num_token_workers = self.world_size
+            prefill_world_size = pipeline_parallel_size * self.prefill_tp
+            decode_world_size = pipeline_parallel_size * self.decode_tp
+            self.num_prompt_workers = prefill_world_size
+            self.num_token_workers = decode_world_size
             self.world_size = self.num_prompt_workers + self.num_token_workers
 
         # Ray worker is not supported for Neuron backend.

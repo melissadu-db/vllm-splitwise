@@ -15,7 +15,8 @@ from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized, get_stage_parallel_group)
+    ensure_model_parallel_initialized, ensure_model_parallel_initialized_disagg,
+    get_stage_parallel_group)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import WorkerType
 from vllm.worker.cache_engine import CacheEngine
@@ -411,8 +412,6 @@ def init_distributed_environment(
     """Initialize the distributed environment."""
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
-        if parallel_config.sep_prompt_token:
-            torch_world_size *= 2
         if torch_world_size != parallel_config.world_size:
             raise RuntimeError(
                 "torch.distributed is already initialized but the torch world "
@@ -453,9 +452,12 @@ def init_distributed_environment(
     torch.distributed.all_reduce(torch.zeros(1).cuda())
     if cupy_utils.is_initialized():
         cupy_utils.all_reduce(torch.zeros(1).cuda())
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size, 
-                                      parallel_config.sep_prompt_token)
+    if sep_prompt_token:
+        ensure_model_parallel_initialized_disagg(parallel_config.prefill_tp, parallel_config.decode_tp)
+    else:
+        ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                        parallel_config.pipeline_parallel_size, 
+                                        parallel_config.sep_prompt_token)
 
     # Initialize a custom fast all-reduce implementation.
     if not parallel_config.disable_custom_all_reduce:
