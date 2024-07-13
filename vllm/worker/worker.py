@@ -452,7 +452,7 @@ def init_distributed_environment(
     torch.distributed.all_reduce(torch.zeros(1).cuda())
     if cupy_utils.is_initialized():
         cupy_utils.all_reduce(torch.zeros(1).cuda())
-    if sep_prompt_token:
+    if parallel_config.sep_prompt_token:
         ensure_model_parallel_initialized_disagg(parallel_config.prefill_tp, parallel_config.decode_tp)
     else:
         ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,

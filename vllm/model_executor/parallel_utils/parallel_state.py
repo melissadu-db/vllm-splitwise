@@ -26,10 +26,11 @@ def initialize_model_parallel_disagg(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
 
+    tensor_model_parallel_size = prefill_tp + decode_tp
     if (world_size != prefill_tp + decode_tp):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
-            f"# of tensor parallel groups ({prefill_tp + decode_tp})")
+            f"# of tensor parallel groups ({tensor_model_parallel_size})")
 
     num_tensor_model_parallel_groups: int = (world_size // (prefill_tp + decode_tp))
     rank = torch.distributed.get_rank()
@@ -87,7 +88,7 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
-
+    scale_factor: int = 2 if sep_prompt_token else 1
     if (world_size != tensor_model_parallel_size *
             pipeline_model_parallel_size * scale_factor):
         raise RuntimeError(
@@ -145,6 +146,8 @@ def ensure_model_parallel_initialized_disagg(
     if not model_parallel_is_initialized():
         initialize_model_parallel_disagg(prefill_tp, decode_tp)
         return
+    
+    tensor_model_parallel_size = prefill_tp + decode_tp
     assert (
         get_tensor_model_parallel_world_size() == tensor_model_parallel_size
     ), ("tensor parallel group already initialized, but of unexpected size: "

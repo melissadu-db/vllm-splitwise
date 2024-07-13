@@ -163,10 +163,12 @@ class KVCacheCommManager:
 
         # Setup up connections.
         self.corr_worker_rank = (rank + num_prompt_workers) % world_size
+        ranks = range(num_prompt_workers) if rank >= num_prompt_workers else range(
+            num_prompt_workers, world_size)
         transport = mscclpp_comm.Transport.CudaIpc
         # transport = self.mscclpp_group.my_ib_device(rank % get_total_num_gpus())        
         self.mscclpp_conns = self.mscclpp_group.make_connection(
-            [self.corr_worker_rank], transport)
+            list(ranks), transport)
 
     def setup_comm(self, num_layers, kv_cache) -> None:
         # Set up proxy service and proxy channels for KV cache communication.
