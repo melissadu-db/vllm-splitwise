@@ -50,7 +50,7 @@ def initialize_model_parallel_disagg(
     if num_tensor_model_parallel_groups == 2:
         _STAGE_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
     else:
-        prompt_group = torch.distributed.new_group(prefill_tp)
+        prompt_group = torch.distributed.new_group(range(prefill_tp))
         token_group = torch.distributed.new_group(
             range(prefill_tp, world_size))
         if rank < prefill_tp:
