@@ -91,7 +91,7 @@ class LLMEngine:
         self,
         model_config: ModelConfig,
         cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
+        parallel_config: Union[ParallelConfig, DisaggParallelConfig],
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
@@ -99,6 +99,10 @@ class LLMEngine:
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
+        if parallel_config.disagg_mode == 'distserve':
+            tensor_parallel_size = (parallel_config.prefill_tp, parallel_config.decode_tp)
+        else:
+            tensor_parallel_size = parallel_config.tensor_parallel_size
         logger.info(f"Initializing an LLM engine (v{vllm.__version__}) with config: "
                     f"model={model_config.model!r}, "
                     f"tokenizer={model_config.tokenizer!r}, "
@@ -110,10 +114,8 @@ class LLMEngine:
                     f"max_seq_len={model_config.max_model_len}, "
                     f"download_dir={model_config.download_dir!r}, "
                     f"load_format={model_config.load_format}, "
-                    f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-                    f"prefill_tp={parallel_config.prefill_tp}, "
-                    f"decode_tp={parallel_config.decode_tp}, "
-                    f"sep_prompt_token={parallel_config.sep_prompt_token}, "
+                    f"tensor_parallel_size={tensor_parallel_size}, "
+                    f"disagg_mode={parallel_config.disagg_mode}, "
                     f"disable_custom_all_reduce="
                     f"{parallel_config.disable_custom_all_reduce}, "
                     f"quantization={model_config.quantization}, "
@@ -130,34 +132,30 @@ class LLMEngine:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.log_stats = log_stats
-        self._verify_args()
+        self.disagg_mode = parallel_config.disagg_mode
 
         self.seq_counter = Counter()
         if placement_group is None:
-            if parallel_config.sep_prompt_token:
+            if self.disagg_mode == 'distserve':
                 placement_group = initialize_placement_disagg(parallel_config, model_config)
             else:
                 placement_group = initialize_ray_cluster(parallel_config)
 
-        model_executor = executor_class(model_config, cache_config, parallel_config, scheduler_config, device_config,
-                                        lora_config)
-        self.model_executor = model_executor
-        self.sep_prompt_token = parallel_config.sep_prompt_token
-
-        self._init_tokenizer()
-        if self.sep_prompt_token:
+        if self.disagg_mode == 'distserve':
+            logger.info("Initializing context stage LLM engine")
+            bridge_queue = asyncio.Queue()
+            self.model_executor = executor_class(model_config, cache_config, parallel_config.prefill_parallel_config,
+                                            scheduler_config, device_config, lora_config)
             block_manager = BlockSpaceManager(block_size=self.cache_config.block_size,
                                             num_gpu_blocks=self.cache_config.num_gpu_blocks,
                                             num_cpu_blocks=self.cache_config.num_cpu_blocks,
                                             sliding_window=self.cache_config.sliding_window,
                                             enable_caching=self.cache_config.enable_prefix_caching)
 
-            logger.info("Initializing context stage LLM engine")
-            bridge_queue = asyncio.Queue()
             self.prefill_engine = PrefillLLMEngine(
                 bridge_queue,
                 model_config,
-                parallel_config,
+                parallel_config.prefill_parallel_config,
                 cache_config,
                 scheduler_config,
                 placement_group,
@@ -166,12 +164,20 @@ class LLMEngine:
                 self._on_new_step_output_callback,
                 # self._on_new_lifetime_event_callback
             )
+            self.prefill_engine._verify_args()
 
             logger.info("Initializing decoding stage LLM engine")
+            self.model_executor = executor_class(model_config, cache_config, parallel_config.decode_parallel_config,
+                                            scheduler_config, device_config, lora_config)
+            block_manager = BlockSpaceManager(block_size=self.cache_config.block_size,
+                                            num_gpu_blocks=self.cache_config.num_gpu_blocks,
+                                            num_cpu_blocks=self.cache_config.num_cpu_blocks,
+                                            sliding_window=self.cache_config.sliding_window,
+                                            enable_caching=self.cache_config.enable_prefix_caching)
             self.decoding_engine = DecodeLLMEngine(
                 bridge_queue,
                 model_config,
-                parallel_config,
+                parallel_config.decode_parallel_config,
                 cache_config,
                 scheduler_config,
                 placement_group,
@@ -181,6 +187,7 @@ class LLMEngine:
                 self._on_new_step_output_callback,
                 # self._on_new_lifetime_event_callback
             )
+            self.decoding_engine._verify_args()
 
             # request_id -> list of RequestOutput
             # Created when calling self.generate()
@@ -201,9 +208,12 @@ class LLMEngine:
             self.decoding_engine._init_tokenizer()
             
         else:
+            self._verify_args()
             # Create the scheduler.
-            self.scheduler = Scheduler(Stage.COMBINED, scheduler_config, cache_config, lora_config,
-                                       self.parallel_config.sep_prompt_token)
+            self.model_executor = executor_class(model_config, cache_config, parallel_config, scheduler_config, 
+                                                device_config, lora_config)
+            self.scheduler = Scheduler(Stage.COMBINED, scheduler_config, cache_config)
+            self._init_tokenizer()
 
         # Metric Logging.
         if self.log_stats:
@@ -234,11 +244,12 @@ class LLMEngine:
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
-        # Create the engine configs.
+        # Create the engine configs.            
         engine_configs = engine_args.create_engine_configs()
         model_config = engine_configs[0]
         parallel_config = engine_configs[2]
-        if parallel_config.sep_prompt_token:
+        
+        if parallel_config.disagg_mode == 'distserve':
             placement_group = initialize_placement_disagg(parallel_config, model_config)
         else:
             placement_group = initialize_ray_cluster(parallel_config)
@@ -359,7 +370,7 @@ class LLMEngine:
         seq_group = SequenceGroup(request_id, [seq], sampling_params, arrival_time, lora_request)
 
         # Add the sequence group to the scheduler.
-        if self.parallel_config.sep_prompt_token:
+        if self.disagg_mode == 'distserve':
             self.prefill_scheduler.add_seq_group(seq_group)
         else:
             self.scheduler.add_seq_group(seq_group)
@@ -381,7 +392,7 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
-        if self.parallel_config.sep_prompt_token:
+        if self.disagg_mode == 'distserve':
             self.prefill_scheduler.abort_seq_group(request_id)
             self.decoding_scheduler.abort_seq_group(request_id)
         else:
@@ -468,7 +479,7 @@ class LLMEngine:
                 # not be used in the future iterations.
                 parent.status = SequenceStatus.FINISHED_ABORTED
                 seq_group.remove(parent.seq_id)
-                if self.sep_prompt_token:
+                if self.disagg_mode == 'distserve':
                     self.prefill_scheduler.free_seq(parent)
                     self.decoding_scheduler.free_seq(parent)
                 else:
@@ -499,7 +510,7 @@ class LLMEngine:
                 if seq is not parent:
                     seq_group.add(seq)
                     if not seq.is_finished():
-                        if self.sep_prompt_token:
+                        if self.disagg_mode == 'distserve':
                             self.prefill_scheduler.fork_seq(parent, seq)
                             self.decoding_scheduler.fork_seq(parent, seq)
                         else:
@@ -599,7 +610,7 @@ class LLMEngine:
         # manager. Keep them in the sequence group as candidate output.
         for seq, parent in selected_child_seqs:
             if seq is parent and seq.is_finished():
-                if self.sep_prompt_token:
+                if self.disagg_mode == 'distserve':
                     self.prefill_scheduler.free_seq(seq)
                     self.decoding_scheduler.free_seq(seq)
                 else:
@@ -612,7 +623,7 @@ class LLMEngine:
                 # Remove the parent sequence if it is not selected for next
                 # iteration
                 seq_group.remove(seq.seq_id)
-                if self.sep_prompt_token:
+                if self.disagg_mode == 'distserve':
                     self.prefill_scheduler.free_seq(seq)
                     self.decoding_scheduler.free_seq(seq)
                 else:
@@ -657,7 +668,7 @@ class LLMEngine:
         request_id: int,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
-        generate - Generate outputs for one request for sep_prompt_token=True
+        generate - Generate outputs for one request for splitwise=True
         
         This function is intended to be used as an async generator, i.e., it can be
         used in a for loop. For example, `async for output in engine.generate(...)`
@@ -680,7 +691,7 @@ class LLMEngine:
         del self.request_outputs[request_id]
 
     def step(self) -> List[RequestOutput]:
-        """Performs one decoding iteration and returns newly generated results for sep_prompt_token=False.
+        """Performs one decoding iteration and returns newly generated results for splitwise=False.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
             :alt: Overview of the step function
@@ -739,7 +750,6 @@ class LLMEngine:
                                                        scheduler_outputs.blocks_to_swap_out,
                                                        scheduler_outputs.blocks_to_copy, scheduler_outputs.blocks_to_nw)
 
-        print("output", [item.seq_data for item in seq_group_metadata_list])
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
@@ -850,7 +860,6 @@ class LLMEngine:
             seq.tokens.extend(new_tokens)
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
-        print(seq.output_text, new_output_text)
         seq.output_text += new_output_text
 
     def _check_stop(self, seq: Sequence, sampling_params: SamplingParams) -> None:
@@ -1072,9 +1081,7 @@ class PrefillLLMEngine(SingleStageLLMEngine):
                 scheduler_outputs.blocks_to_nw)
         
         if output:
-            print("prompt output", [item.seq_data for item in seq_group_metadata_list])
             output = self._process_model_outputs(output, scheduler_outputs)
-            print([out.outputs[0].text for out in output])
             for i in range(len(output)):
                 request = output[i]
                 seq_group = scheduler_outputs.scheduled_seq_groups[i]

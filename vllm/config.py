@@ -215,17 +215,7 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = self.hf_config.num_attention_heads        
-        if total_num_attention_heads % parallel_config.prefill_tp != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by prefill tensor parallel size "
-                f"({parallel_config.prefill_tp}).")
-        if total_num_attention_heads % parallel_config.decode_tp != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by decode tensor parallel size "
-                f"({parallel_config.decode_tp}).")
+        total_num_attention_heads = self.hf_config.num_attention_heads  
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
@@ -417,13 +407,12 @@ class ParallelConfig:
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         worker_use_ray: bool,
-        prefill_tp: Optional[int] = None,
-        decode_tp: Optional[int] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         ray_workers_use_nsight: bool = False,
+        disagg_mode: Optional[str] = None,
         placement_group: Optional["PlacementGroup"] = None,
-        sep_prompt_token: bool = False,
+        world_size: Optional[int] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
@@ -436,31 +425,34 @@ class ParallelConfig:
         else:
             self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
-        self.prefill_tp = prefill_tp
-        self.decode_tp = decode_tp
+        self.disagg_mode = disagg_mode
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
-        self.sep_prompt_token = sep_prompt_token
-        if not prefill_tp:
-            self.prefill_tp = tensor_parallel_size
-        if not decode_tp:
-            self.decode_tp = tensor_parallel_size
 
-        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if sep_prompt_token:
+        self.world_size = world_size if world_size else pipeline_parallel_size * self.tensor_parallel_size
+        self._verify_disagg_mode()
+        if self.disagg_mode == 'splitwise':
             # Half of the workers are prompt workers and the other half are token
-            prefill_world_size = pipeline_parallel_size * self.prefill_tp
-            decode_world_size = pipeline_parallel_size * self.decode_tp
-            self.num_prompt_workers = prefill_world_size
-            self.num_token_workers = decode_world_size
+            self.num_prompt_workers = self.world_size
+            self.num_token_workers = self.world_size
             self.world_size = self.num_prompt_workers + self.num_token_workers
 
         # Ray worker is not supported for Neuron backend.
         if self.world_size > 1 and not is_neuron():
             self.worker_use_ray = True
         self._verify_args()
+    
+    def _verify_disagg_mode(self) -> None:
+        if not self.disagg_mode:
+            return
+        disagg_mode = self.disagg_mode.lower() 
+        if disagg_mode not in ["splitwise", "distserve"]:
+            raise ValueError(
+                f"Unknown disagg mode: {self.disagg_mode}. Must be "
+                "either 'splitwise' or 'distserve'.")
+        self.disagg_mode = disagg_mode
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
@@ -490,6 +482,55 @@ class ParallelConfig:
                 "stability issues. We will re-enable them once the issues are "
                 "resolved.")
 
+class DisaggParallelConfig:
+    def __init__(
+        self,
+        pipeline_parallel_size: int,
+        prefill_tp: int,
+        decode_tp: int,
+        worker_use_ray: bool,
+        max_parallel_loading_workers: Optional[int] = None,
+        disable_custom_all_reduce: bool = False,
+        ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
+    ) -> None:
+        # Number of prompt and token workers determined by tensor parallelism settings
+        prefill_world_size = pipeline_parallel_size * prefill_tp
+        decode_world_size = pipeline_parallel_size * decode_tp
+        self.num_prompt_workers = prefill_world_size
+        self.num_token_workers = decode_world_size
+        self.world_size = prefill_world_size + decode_world_size
+         # Ray worker is not supported for Neuron backend.
+        if self.world_size > 1 and not is_neuron():
+            self.worker_use_ray = True
+
+        self.world_size = self.num_prompt_workers + self.num_token_workers
+        self.disagg_mode = 'distserve'
+        self.prefill_tp = prefill_tp
+        self.decode_tp = decode_tp
+        self.pipeline_parallel_size = pipeline_parallel_size
+        self.disable_custom_all_reduce = disable_custom_all_reduce
+
+        self.prefill_parallel_config = ParallelConfig(
+            pipeline_parallel_size=pipeline_parallel_size,
+            tensor_parallel_size=prefill_tp,
+            worker_use_ray=worker_use_ray,
+            max_parallel_loading_workers=max_parallel_loading_workers,
+            ray_workers_use_nsight=ray_workers_use_nsight,
+            disagg_mode='distserve',
+            placement_group=placement_group,
+            world_size=prefill_tp+decode_tp,
+        )
+        self.decode_parallel_config = ParallelConfig(
+            pipeline_parallel_size=pipeline_parallel_size,
+            tensor_parallel_size=decode_tp,
+            worker_use_ray=worker_use_ray,
+            max_parallel_loading_workers=max_parallel_loading_workers,
+            ray_workers_use_nsight=ray_workers_use_nsight,
+            disagg_mode='distserve',
+            placement_group=placement_group,
+            world_size=prefill_tp+decode_tp,
+        )
 
 class SchedulerConfig:
     """Scheduler configuration.

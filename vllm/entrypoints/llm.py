@@ -34,7 +34,7 @@ class LLM:
             downloading the model and tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
-        sep_prompt_token: Whether to disaggregate prefill and decode.
+        splitwise: Whether to disaggregate prefill and decode.
         dtype: The data type for the model weights and activations. Currently,
             we support `float32`, `float16`, and `bfloat16`. If `auto`, we use
             the `torch_dtype` attribute specified in the model config file.
@@ -76,7 +76,9 @@ class LLM:
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
-        sep_prompt_token: bool = False,
+        prefill_tp: Optional[int] = None,
+        decode_tp: Optional[int] = None,
+        disagg_mode: Optional[str] = None,
         dtype: str = "auto",
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
@@ -97,7 +99,9 @@ class LLM:
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
-            sep_prompt_token=sep_prompt_token,
+            prefill_tp=prefill_tp,
+            decode_tp=decode_tp,
+            disagg_mode=disagg_mode,
             dtype=dtype,
             quantization=quantization,
             revision=revision,
@@ -111,7 +115,7 @@ class LLM:
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
-        self.sep_prompt_token = sep_prompt_token
+        self.disagg_mode = disagg_mode
         self.request_counter = Counter()
 
     def get_tokenizer(self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
@@ -172,7 +176,7 @@ class LLM:
             id = self._add_request(prompt, sampling_params, token_ids, lora_request=lora_request)
             req_ids.append(id)
 
-        if self.sep_prompt_token:
+        if self.disagg_mode == 'distserve':
             async def deal_with_request_coroutine(req_id: int) -> RequestOutput:
                 async for output in self.llm_engine.generate(req_id):
                     if output.finished:

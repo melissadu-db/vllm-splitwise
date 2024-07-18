@@ -1,13 +1,13 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Tuple, Set, Optional
+from typing import Dict, List, Tuple, Set, Optional, Union
 
 import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+                         ParallelConfig, DisaggParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils import cupy_utils
@@ -119,7 +119,7 @@ class Worker:
 
     def load_model(self):
         self.model_runner.load_model()
-        if self.parallel_config.sep_prompt_token:
+        if self.parallel_config.disagg_mode:
             # Populate Sampler with dst_rank as driver worker's rank.
             self.model_runner.model.sampler.set_dst_rank(
                 self.model_runner.driver_rank)
@@ -130,7 +130,7 @@ class Worker:
             from vllm.worker.comm_utils import KVCacheCommManager
             self.kvcache_comm_manager = KVCacheCommManager(
                 self.rank, self.parallel_config.world_size,
-                self.parallel_config.num_prompt_workers, mscclpp_init_method)
+                self.parallel_config.num_prompt_workers, mscclpp_init_method, self.parallel_config.disagg_mode)
 
             self.worker_type = (WorkerType.PROMPT if self.rank <
                                 self.parallel_config.num_prompt_workers else
@@ -404,7 +404,7 @@ class Worker:
 
 
 def init_distributed_environment(
-    parallel_config: ParallelConfig,
+    parallel_config: Union[ParallelConfig, DisaggParallelConfig],
     rank: int,
     cupy_port: Optional[int],
     distributed_init_method: Optional[str] = None,
@@ -452,12 +452,12 @@ def init_distributed_environment(
     torch.distributed.all_reduce(torch.zeros(1).cuda())
     if cupy_utils.is_initialized():
         cupy_utils.all_reduce(torch.zeros(1).cuda())
-    if parallel_config.sep_prompt_token:
-        ensure_model_parallel_initialized_disagg(parallel_config.prefill_tp, parallel_config.decode_tp)
+    if parallel_config.disagg_mode == 'distserve':
+        ensure_model_parallel_initialized_disagg(parallel_config)
     else:
         ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                        parallel_config.pipeline_parallel_size, 
-                                        parallel_config.sep_prompt_token)
+                                        parallel_config.pipeline_parallel_size,
+                                        parallel_config.disagg_mode)
 
     # Initialize a custom fast all-reduce implementation.
     if not parallel_config.disable_custom_all_reduce:

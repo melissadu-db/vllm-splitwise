@@ -2,6 +2,7 @@ import cupy as cp
 import os
 
 from vllm.utils import get_total_num_gpus, MAX_SLOT_IDS
+from vllm.logger import init_logger
 
 try:
     import mscclpp.comm as mscclpp_comm
@@ -18,6 +19,7 @@ HEAD_TYPES = [0, 1]  # 0 for keys, 1 for values
 
 KERNEL_DIR = os.path.dirname(os.path.abspath(__file__)) + "/../../csrc"
 
+logger = init_logger(__name__)
 
 class SendKVKernel:
     """ SendKVKernel is a wrapper around a CUDA kernel that uses
@@ -150,7 +152,7 @@ class KVCacheCommunicator:
 class KVCacheCommManager:
 
     def __init__(self, rank, world_size, num_prompt_workers,
-                 mscclpp_init_method) -> None:
+                 mscclpp_init_method, disagg_mode) -> None:
         self.kvcache_comm = None
         self.proxy_service = None
 
@@ -162,13 +164,17 @@ class KVCacheCommManager:
         )
 
         # Setup up connections.
-        self.corr_worker_rank = (rank + num_prompt_workers) % world_size
-        ranks = range(num_prompt_workers) if rank >= num_prompt_workers else range(
+        if disagg_mode == 'distserve':
+            self.corr_worker_ranks = range(num_prompt_workers) if rank >= num_prompt_workers else range(
             num_prompt_workers, world_size)
+        else:
+            self.corr_worker_ranks = [(rank + num_prompt_workers) % world_size]
+            self.corr_worker_rank = (rank + num_prompt_workers) % world_size
         transport = mscclpp_comm.Transport.CudaIpc
-        # transport = self.mscclpp_group.my_ib_device(rank % get_total_num_gpus())        
+        # transport = self.mscclpp_group.my_ib_device(rank % get_total_num_gpus())  
+        logger.debug(f"Establishing connection between {rank} and {self.corr_worker_ranks} with {transport}")      
         self.mscclpp_conns = self.mscclpp_group.make_connection(
-            list(ranks), transport)
+            self.corr_worker_ranks, transport)
 
     def setup_comm(self, num_layers, kv_cache) -> None:
         # Set up proxy service and proxy channels for KV cache communication.

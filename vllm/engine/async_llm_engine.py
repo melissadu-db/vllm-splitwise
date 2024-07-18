@@ -394,7 +394,7 @@ class AsyncLLMEngine:
         # Initialize the RequestTracker here so it uses the right event loop.
         self._request_tracker = RequestTracker()
 
-        if self.engine.sep_prompt_token:   
+        if self.engine.disagg_mode == 'distserve':   
             self._background_loop_unshielded = asyncio.get_event_loop(
             ).create_task(self.start_event_loop())
             
@@ -624,7 +624,7 @@ class AsyncLLMEngine:
         # This should not be used for logging, as it is monotonic time.
         arrival_time = time.monotonic()
 
-        if self.engine.sep_prompt_token:
+        if self.engine.disagg_mode == 'distserve':
             self.engine.add_request(request_id, prompt, sampling_params, prompt_token_ids, arrival_time, lora_request)
             if not self.is_running:
                 self.start_background_loop()

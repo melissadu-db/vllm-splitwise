@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+                         ParallelConfig, DisaggParallelConfig, SchedulerConfig, 
+                         LoRAConfig)
 
 
 @dataclass
@@ -25,8 +26,8 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     prefill_tp: Optional[int] = None
     decode_tp: Optional[int] = None
+    disagg_mode: Optional[str] = None
     max_parallel_loading_workers: Optional[int] = None
-    sep_prompt_token: bool = False
     block_size: int = 16
     enable_prefix_caching: bool = False
     swap_space: int = 4  # GiB
@@ -166,6 +167,16 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='number of tensor parallel replicas')
+        parser.add_argument('--prefill-tp',
+                            '-tpt',
+                            type=int,
+                            default=EngineArgs.prefill_tp,
+                            help='prefill tensor parallelism')
+        parser.add_argument('--decode-tp',
+                            '-dpt',
+                            type=int,
+                            default=EngineArgs.decode_tp,
+                            help='decode tensor parallelism')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -177,6 +188,13 @@ class EngineArgs:
             '--sep-prompt-token',
             action='store_true',
             help='separate the prompt processing and token sampling')
+        parser.add_argument(
+            '--disagg-mode',
+            type=str,
+            default=EngineArgs.disagg_mode,
+            choices=['splitwise', 'distserve'],
+            help='disaggregated mode for parallelism')
+            
         parser.add_argument(
             '--ray-workers-use-nsight',
             action='store_true',
@@ -321,15 +339,26 @@ class EngineArgs:
                                    self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window(),
                                    self.enable_prefix_caching)
-        parallel_config = ParallelConfig(self.pipeline_parallel_size,
-                                         self.tensor_parallel_size,
-                                         self.worker_use_ray,
-                                         self.prefill_tp,
-                                         self.decode_tp,
-                                         self.max_parallel_loading_workers,
-                                         self.disable_custom_all_reduce,
-                                         self.ray_workers_use_nsight,
-                                         sep_prompt_token=self.sep_prompt_token)
+        if self.disagg_mode == 'distserve':
+            if not self.prefill_tp:
+                self.prefill_tp = self.tensor_parallel_size
+            if not self.decode_tp:
+                self.decode_tp = self.tensor_parallel_size
+            parallel_config = DisaggParallelConfig(self.pipeline_parallel_size,
+                                                self.prefill_tp,
+                                                self.decode_tp,
+                                                self.worker_use_ray,
+                                                self.max_parallel_loading_workers,
+                                                self.disable_custom_all_reduce,
+                                                self.ray_workers_use_nsight)
+        else:
+            parallel_config = ParallelConfig(self.pipeline_parallel_size,
+                                            self.tensor_parallel_size,
+                                            self.worker_use_ray,
+                                            self.max_parallel_loading_workers,
+                                            self.disable_custom_all_reduce,
+                                            self.ray_workers_use_nsight,
+                                            self.disagg_mode)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

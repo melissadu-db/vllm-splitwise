@@ -171,7 +171,7 @@ def broadcast_tensor_dict(
                     (key, TensorMetadata(value.dtype, value.size())))
             else:
                 metadata_list.append((key, value))
-        logger.debug(f"Starting torch broadcast for {metadata_list}")
+        logger.debug(f"Starting torch broadcast")
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
                                                 group=group)

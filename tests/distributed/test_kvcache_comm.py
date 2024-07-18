@@ -32,7 +32,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     args.model = "meta-llama/Meta-Llama-3-8B-Instruct"
     args.tensor_parallel_size = 2
-    args.sep_prompt_token = True
+    args.disagg_mode = 'splitwise'
     engine = initialize_engine(args)
 
     run_all_workers(engine, "set_gpucache")

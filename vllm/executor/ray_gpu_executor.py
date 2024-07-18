@@ -57,6 +57,7 @@ class RayGPUExecutor(ExecutorBase):
 
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
+        print(placement_group)
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -69,7 +70,7 @@ class RayGPUExecutor(ExecutorBase):
         # Profile the memory usage and initialize the cache.
         self._init_cache()
 
-        if self.parallel_config.sep_prompt_token:
+        if self.parallel_config.disagg_mode:
             # Setup the MSCCL++ communication required for KV cache transfer
             self._setup_kvcache_comm()
 
@@ -170,7 +171,7 @@ class RayGPUExecutor(ExecutorBase):
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
-        mscclpp_init_method = f"eth0:{driver_ip}:{get_open_port()}" if self.parallel_config.sep_prompt_token else None
+        mscclpp_init_method = f"eth0:{driver_ip}:{get_open_port()}" if self.parallel_config.disagg_mode else None
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
@@ -288,7 +289,7 @@ class RayGPUExecutor(ExecutorBase):
                       blocks_to_copy: Dict[int, List[int]],
                       blocks_to_nw: Dict[int, List[int]]) -> SamplerOutput:
 
-        if self.parallel_config.sep_prompt_token:
+        if self.parallel_config.disagg_mode:
             # TODO: This will only schedule one set of workers at a time and will not be
             # able to take advantage of parallely running prompt and token workers.
             all_outputs = self._run_stage_workers(
@@ -405,7 +406,7 @@ class RayGPUExecutor(ExecutorBase):
     ) -> Any:
         """Runs the given method on prompt workers or token workers."""
 
-        assert self.parallel_config.sep_prompt_token
+        assert self.parallel_config.disagg_mode
         if max_concurrent_workers:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
@@ -512,7 +513,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         """Runs the given method on prompt workers or token workers."""
         coros = []
 
-        assert self.parallel_config.sep_prompt_token
+        assert self.parallel_config.disagg_mode
         if max_concurrent_workers:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
@@ -580,7 +581,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         blocks_to_copy: Dict[int, List[int]],
         blocks_to_nw: Dict[int, List[int]],
     ) -> SamplerOutput:
-        if self.parallel_config.sep_prompt_token:
+        if self.parallel_config.disagg_mode:
             # TODO: This will only schedule one set of workers at a time and will not be
             # able to take advantage of parallely running prompt and token workers.
             all_outputs = await self._run_stage_workers_async(

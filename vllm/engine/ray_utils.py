@@ -1,6 +1,6 @@
-from typing import Optional, List, Tuple, TYPE_CHECKING
+from typing import Optional, List, Tuple, TYPE_CHECKING, Union
 import pickle
-from vllm.config import ParallelConfig, ModelConfig
+from vllm.config import ParallelConfig, ModelConfig, DisaggParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import is_hip, set_cuda_visible_devices, get_ip
 
@@ -140,7 +140,7 @@ def initialize_ray_cluster(
     return current_placement_group
 
 def initialize_placement_disagg(
-    parallel_config: ParallelConfig,
+    parallel_config: Union[ParallelConfig, DisaggParallelConfig],
     model_config: ModelConfig,
     ray_address: Optional[str] = None,
 ) -> Optional["PlacementGroup"]:
@@ -177,16 +177,8 @@ def initialize_placement_disagg(
             strategy="STRICT_PACK",
         )
         ray.get(placement_group.ready(), timeout=1000)
-
-        # No pipeline parallelism means we don't support multiple placement groups by layer
-        # placement_groups = []
-        # for i in range(num_placement_groups):
-        #     placement_group = ray.util.placement_group(
-        #         [ { "GPU": 1 }] * workers_per_placement_group,
-        #         strategy="STRICT_PACK",
-        #     )
-        #     ray.get(placement_group.ready(), timeout=1000)
-        #     placement_groups.append(placement_group)
         
         parallel_config.placement_group = placement_group
+        parallel_config.prefill_parallel_config.placement_group = placement_group
+        parallel_config.decode_parallel_config.placement_group = placement_group
         return placement_group

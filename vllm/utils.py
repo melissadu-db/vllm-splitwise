@@ -125,7 +125,7 @@ class LRUCache:
 
 
 # Maximum number of sequences that can be in the system at a time
-# Only used when sep_prompt_token is set in Parallel Config
+# Only used when splitwise is set in Parallel Config
 # It determines the number of semaphores that will be used for KV cache transfer using MSCCL++
 # This can be changed based on need
 MAX_SLOT_IDS = 256
