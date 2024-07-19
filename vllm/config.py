@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version, Stage
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -285,7 +285,7 @@ class ModelConfig:
         # equal to the number of attention heads.
         return self.hf_config.num_attention_heads
 
-    def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_kv_heads(self, tensor_parallel_size) -> int:
         """Returns the number of KV heads per GPU."""
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
@@ -293,7 +293,7 @@ class ModelConfig:
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
         return max(1,
-                   total_num_kv_heads // parallel_config.tensor_parallel_size)
+                   total_num_kv_heads // tensor_parallel_size)
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
@@ -413,6 +413,7 @@ class ParallelConfig:
         disagg_mode: Optional[str] = None,
         placement_group: Optional["PlacementGroup"] = None,
         world_size: Optional[int] = None,
+        stage: Optional[Stage] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
@@ -438,6 +439,12 @@ class ParallelConfig:
             self.num_prompt_workers = self.world_size
             self.num_token_workers = self.world_size
             self.world_size = self.num_prompt_workers + self.num_token_workers
+        if self.disagg_mode == 'distserve':
+            if stage == Stage.PREFILL:
+                self.num_prompt_workers = self.tensor_parallel_size
+            else:
+                self.num_prompt_workers = self.world_size - self.tensor_parallel_size
+            self.num_token_workers = self.world_size - self.num_prompt_workers
 
         # Ray worker is not supported for Neuron backend.
         if self.world_size > 1 and not is_neuron():
@@ -520,6 +527,7 @@ class DisaggParallelConfig:
             disagg_mode='distserve',
             placement_group=placement_group,
             world_size=prefill_tp+decode_tp,
+            stage=Stage.PREFILL
         )
         self.decode_parallel_config = ParallelConfig(
             pipeline_parallel_size=pipeline_parallel_size,
@@ -530,6 +538,7 @@ class DisaggParallelConfig:
             disagg_mode='distserve',
             placement_group=placement_group,
             world_size=prefill_tp+decode_tp,
+            stage=Stage.DECODE,
         )
 
 class SchedulerConfig:

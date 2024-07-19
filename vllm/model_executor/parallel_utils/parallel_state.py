@@ -37,7 +37,6 @@ def initialize_model_parallel_disagg(parallel_config) -> None:
     global _STAGE_PARALLEL_GROUP
     assert _TENSOR_MODEL_PARALLEL_GROUP is None, (
         "tensor model parallel group is already initialized")
-    print('creating', parallel_config.tensor_parallel_size, parallel_config.world_size)
     prompt_group = torch.distributed.new_group(range(parallel_config.tensor_parallel_size))
     token_group = torch.distributed.new_group(
         range(parallel_config.tensor_parallel_size, parallel_config.world_size))

@@ -129,8 +129,7 @@ class Worker:
         if mscclpp_init_method is not None:
             from vllm.worker.comm_utils import KVCacheCommManager
             self.kvcache_comm_manager = KVCacheCommManager(
-                self.rank, self.parallel_config.world_size,
-                self.parallel_config.num_prompt_workers, mscclpp_init_method, self.parallel_config.disagg_mode)
+                self.rank, self.parallel_config, self.model_config, mscclpp_init_method)
 
             self.worker_type = (WorkerType.PROMPT if self.rank <
                                 self.parallel_config.num_prompt_workers else

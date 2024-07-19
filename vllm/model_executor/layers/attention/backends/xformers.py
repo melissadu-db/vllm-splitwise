@@ -84,6 +84,7 @@ class XFormersBackend:
         if input_metadata.is_prompt:
             # Prompt run.
             if len(input_metadata.blocks_to_nw):
+                print(input_metadata.blocks_to_nw)
                 assert self.kvcache_comm_manager is not None
                 for semid in input_metadata.blocks_to_nw:
                     for block_start, num_blocks in input_metadata.blocks_to_nw[semid]:

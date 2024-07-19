@@ -11,7 +11,8 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.0, top_p=0.95)
 
 # Create an LLM.
-# llm = LLM(model="facebook/opt-125m", disagg_mode='splitwise', prefill_tp=4, decode_tp=2, enforce_eager=True)
+# llm = LLM(model="facebook/opt-125m", disagg_mode='distserve', prefill_tp=4, decode_tp=2, enforce_eager=True)
+# llm = LLM(model="facebook/opt-125m", disagg_mode='splitwise', tensor_parallel_size=2, enforce_eager=True)
 llm = LLM(model="facebook/opt-125m", tensor_parallel_size=4, disagg_mode='distserve', enforce_eager=True)
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects

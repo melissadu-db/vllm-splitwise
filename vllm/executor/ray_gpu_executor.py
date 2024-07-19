@@ -57,7 +57,6 @@ class RayGPUExecutor(ExecutorBase):
 
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
-        print(placement_group)
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")

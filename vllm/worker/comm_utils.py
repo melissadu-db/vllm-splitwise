@@ -1,7 +1,7 @@
 import cupy as cp
 import os
 
-from vllm.utils import get_total_num_gpus, MAX_SLOT_IDS
+from vllm.utils import get_total_num_gpus, MAX_SLOT_IDS, Stage
 from vllm.logger import init_logger
 
 try:
@@ -151,25 +151,46 @@ class KVCacheCommunicator:
 
 class KVCacheCommManager:
 
-    def __init__(self, rank, world_size, num_prompt_workers,
-                 mscclpp_init_method, disagg_mode) -> None:
+    def __init__(self, rank, parallel_config, model_config,
+                 mscclpp_init_method) -> None:
         self.kvcache_comm = None
         self.proxy_service = None
 
         # Initialize the MSCCL++ group.
         self.mscclpp_group = mscclpp_comm.CommGroup(
             rank=rank,
-            size=world_size,
+            size=parallel_config.world_size,
             interfaceIpPortTrio=mscclpp_init_method,
         )
 
         # Setup up connections.
-        if disagg_mode == 'distserve':
-            self.corr_worker_ranks = range(num_prompt_workers) if rank >= num_prompt_workers else range(
-            num_prompt_workers, world_size)
+        if parallel_config.disagg_mode == 'distserve':
+            # FIND THE WORKERS THAT OVERLAP IN KV HEADS
+            prefill_tp = parallel_config.num_prompt_workers
+            decode_tp = parallel_config.num_token_workers
+            prefill_head_size = model_config.get_num_kv_heads(prefill_tp)
+            decode_head_size = model_config.get_num_kv_heads(decode_tp)
+            if rank >= prefill_tp:
+                rank = rank - prefill_tp # local rank
+                head_start = decode_head_size * rank
+                head_end = decode_head_size * (rank + 1)
+                prefill_head_start_rank = head_start // prefill_head_size
+                prefill_head_end_rank = (head_end // prefill_head_size) + 1 if head_end % prefill_head_size != 0 else head_end // prefill_head_size
+                self.corr_worker_ranks = list(range(prefill_head_start_rank, prefill_head_end_rank))
+            else:
+                head_start = prefill_head_size * rank
+                head_end = prefill_head_size * (rank + 1)
+                decode_head_start_rank = prefill_tp + (head_start // decode_head_size)
+                decode_head_end_rank = prefill_tp + (head_end // decode_head_size) + 1 if head_end % decode_head_size != 0 else prefill_tp + (head_end // decode_head_size)
+                self.corr_worker_ranks = list(range(decode_head_start_rank, decode_head_end_rank))
+            
+            print(f"Rank {rank} has {self.corr_worker_ranks}")
+            ### TODO: NEED TO ADD MORE CONFIGURATION TO SUPPORT M:N COMMUNICATION
+            assert prefill_tp == decode_tp
+            self.corr_worker_rank = (rank + parallel_config.num_prompt_workers) % parallel_config.world_size
         else:
-            self.corr_worker_ranks = [(rank + num_prompt_workers) % world_size]
-            self.corr_worker_rank = (rank + num_prompt_workers) % world_size
+            self.corr_worker_ranks = [(rank + parallel_config.num_prompt_workers) % parallel_config.world_size]
+            self.corr_worker_rank = (rank + parallel_config.num_prompt_workers) % parallel_config.world_size
         transport = mscclpp_comm.Transport.CudaIpc
         # transport = self.mscclpp_group.my_ib_device(rank % get_total_num_gpus())  
         logger.debug(f"Establishing connection between {rank} and {self.corr_worker_ranks} with {transport}")      
@@ -197,6 +218,7 @@ class KVCacheCommManager:
         proxy_channels = [None for _ in range(MAX_SLOT_IDS)]
         device_handles = [None for _ in range(MAX_SLOT_IDS)]
         for sem_id in range(MAX_SLOT_IDS):
+            print(f"Registering semaphore with proxy for {sem_id} {self.mscclpp_group.register_semaphore_with_proxy(self.proxy_service, self.mscclpp_conns)}")
             proxy_channels[
                 sem_id] = self.mscclpp_group.register_semaphore_with_proxy(
                     self.proxy_service,
